@@ -17,7 +17,7 @@ logging.basicConfig(level=logging.DEBUG,  # Set the log level
 # Configuration Constants
 CONFIG = {
     # Total number of robots in the system.
-    "TOTAL_ROBOTS": 50,
+    "TOTAL_ROBOTS": 10,
     
     # Standard deviation of noise added to control inputs.
     "CONTROL_NOISE_STD": 0.05,
@@ -47,7 +47,7 @@ CONFIG = {
     "TARGET_AREA": (1, 1),
     
     # Number of steps in the simulation or control loop.
-    "num_steps": 20,
+    "num_steps": 100,
 
     # Proportional gain for the PID controller—controls response based on current error.
     "kp_leader": 1.0,
@@ -95,7 +95,17 @@ CONFIG = {
     "FOLLOWER_INDEX": 1,  # Default for follower; update dynamically during the simulation if needed.
 
     # Distance threshold for reaching a waypoint.
-    "close_enough": 0.03  
+    "close_enough": 0.03, 
+
+    # Regular Sensing range of robots
+    "regular_sensing_range": 2,
+    
+    # Shadow Sensing range of robots
+    "shadow_sensing_range": 3, 
+
+    # distance between the wheel
+    "b": 0.1
+
 }
 
 
@@ -379,14 +389,55 @@ def measurement_update(x_hat_pred, P_pred, measurement, R, h, nearby_positions, 
 
 
 
+def state_transition(previousPose, ut):
+    # Estimates the next position and orientation of a 2 wheeled robot
+    # INPUT: 
+    # previousPose: 1x3 array [previousX, previousY, previousTheta]
+    # ut: 1x2 array [DL, DR]
+    
+    previousX = previousPose[0]
+    previousY = previousPose[1]
+    previousTheta = previousPose[2]
 
-def state_transition(x, u):
-    """Example state transition function."""
-    x_new = np.copy(x)
-    x_new[0] += u[0] * np.cos(x[2])  # x-position update
-    x_new[1] += u[0] * np.sin(x[2])  # y-position update
-    x_new[2] += u[1]  # Theta update
-    return x_new
+    DL = ut[0]
+    DR = ut[1]
+
+
+    # Calculate the new x coordinate
+    currentX = previousX + ((DR + DL) / 2) * np.cos(previousTheta + ((DR - DL) / (2 * CONFIG["b"])))
+
+    # Calculate the new y coordinate
+    currentY = previousY + ((DR + DL) / 2) * np.sin(previousTheta + ((DR - DL) / (2 * CONFIG["b"])))
+
+    # Calculate the new Theta
+    currentTheta = previousTheta + (DR - DL) / CONFIG["b"]
+
+    # Normalize results between [-pi, pi]
+    currentTheta = normalizeAngle(currentTheta)
+
+    print(np.array([currentX, currentY, currentTheta]).shape, "np.array([currentX, currentY, currentTheta]).shape")
+
+    # Create the output as a numpy array
+    return np.array([currentX, currentY, currentTheta]).flatten()
+
+def normalizeAngle(originalAngle):
+    """
+    Normalizes angle to the range [-pi, pi].
+
+    Args:
+        originalAngle (float): Input angle in radians.
+
+    Returns:
+        float: Angle normalized to the range [-pi, pi].
+    """
+    # Normalize to [0, 2*pi)
+    normalizedAngle = originalAngle % (2 * np.pi)
+
+    # Shift to [-pi, pi] if necessary
+    if normalizedAngle > np.pi:
+        normalizedAngle -= 2 * np.pi
+
+    return normalizedAngle
 
 def control_barrier_function(robot_position, other_positions, min_distance):
     """
@@ -737,9 +788,9 @@ def get_neighbors(i, total_robots, shadow=False):
     shadow_neighbors = []
     for j in range(total_robots):
         if i != j:  # Exclude self
-            if np.linalg.norm(x_hat[:, i] - x_hat[:, j]) < 1.0:
+            if np.linalg.norm(x_hat[:, i] - x_hat[:, j]) < CONFIG["regular_sensing_range"]:
                 neighbors.append(j)
-            elif shadow and np.linalg.norm(x_hat[:, i] - x_hat[:, j]) < 2.0:
+            elif shadow and np.linalg.norm(x_hat[:, i] - x_hat[:, j]) < CONFIG["shadow_sensing_range"]:
                 shadow_neighbors.append(j)
     return neighbors, shadow_neighbors
 
@@ -761,7 +812,7 @@ def run_simulation(robotarium_env, CONFIG, x_hat, P, positions, target_positions
                    generate_initial_positions, range_measurement, bearing_measurement, 
                    shadow_range_measurement,  # New shadow measurement functions
                    leader_control_policy, follower_control_policy, 
-                   animate, plot_final_states, do_s_attack_probability, 
+                    plot_final_states, do_s_attack_probability, 
                    fdi_attack_probability, max_dos_robots, max_fdi_measurements):
     """
     Runs the simulation of UGVs in the Robotarium environment with limited attacks.
@@ -796,6 +847,7 @@ def run_simulation(robotarium_env, CONFIG, x_hat, P, positions, target_positions
     logging.info("Starting the simulation.")
     ground_truth_positions = []
     estimated_positions = []
+    control_command = []
 
     leader_index = 0  # Leader is robot 0
     follower_indices = [i for i in range(1, CONFIG["TOTAL_ROBOTS"])]
@@ -908,14 +960,14 @@ def run_simulation(robotarium_env, CONFIG, x_hat, P, positions, target_positions
                 # Plot followers
                 #plt.scatter(ground_truth[0, i], ground_truth[1, i], color='green', label='Follower' if i == 0 else "")
 
-
             # Apply process noise to the control input for both leader and followers
             dxi[:, i] = apply_process_noise(control_input, CONFIG)  # Apply noise to follower inputs
             if i == CONFIG["LEADER_INDEX"]:
                 dxi[:, CONFIG["LEADER_INDEX"]] = apply_process_noise(control_input, CONFIG)  # Apply noise to leader input
 
             # Apply control barriers, convert to unicycle, and set velocities
-            dxu = si_to_uni_dyn(dxi, ground_truth)  # Convert to unicycle dynamics
+            dxi = si_barrier_cert(dxi, ground_truth[:2, :])
+            dxu = si_to_uni_dyn(dxi, ground_truth)
             r.set_velocities(np.arange(CONFIG["TOTAL_ROBOTS"]), dxu)  # Update velocities for all robots
 
 
@@ -974,21 +1026,21 @@ def run_simulation(robotarium_env, CONFIG, x_hat, P, positions, target_positions
  
             positions[:, i, step] = x_hat[0:2, i, step]  # Update position based on the estimated state
   
-
             # Update estimated positions for the next step
             ground_truth_positions.append(ground_truth[:, i])
             estimated_positions.append(x_hat[:, i, step])
-        print(estimated_positions, "estimated_positions")
-        print(ground_truth_positions, "ground_truth_positions")
+            control_command.append(control_input[:, np.newaxis])
+        
 
+    
+    ground_truth_positions = np.array(ground_truth_positions)
+    estimated_positions = np.array(estimated_positions)
+    control_command = np.squeeze(np.array(control_command))
 
     # Finalizing the simulation
     logging.debug(f"Final step {step}: current positions {positions}")
-
-     # Animate the results
-    #animate(np.array(ground_truth_positions), np.array(estimated_positions), CONFIG["num_steps"])
     
-    plot_final_states(np.array(ground_truth_positions), np.array(estimated_positions))
+    plot_final_states(ground_truth_positions, estimated_positions, control_command,  CONFIG["TOTAL_ROBOTS"], CONFIG["num_steps"])
 
     
     input("Press Enter to close...")  # Pause until user input
@@ -1001,63 +1053,223 @@ def run_simulation(robotarium_env, CONFIG, x_hat, P, positions, target_positions
 
 
 
-def animate(ugvs, estimates, num_steps):
-    """Real-time animation of UGV positions comparing ground truth and estimates."""
-    fig, ax = plt.subplots()
-    colors = ['b', 'g']  # Define colors for UGVs (ground truth and estimates)
 
-    # Set axis limits and labels
-    ax.set_xlim(0, 1000)
-    ax.set_ylim(0, 1000)
-    ax.set_title("UGV Positions Over Time")
-    ax.set_xlabel("X Position")
-    ax.set_ylabel("Y Position")
-    ax.grid(True)  # Add grid for better visibility
 
-    # Create a scatter plot for ground truth and estimates
-    ground_truth_scatter = ax.scatter([], [], color='b', label='Ground Truth')
-    estimates_scatter = ax.scatter([], [], color='g', label='Estimates')
+def plot_final_states(ground_truth, estimates, control_command, num_robots, samples_per_robot):
+    """Plot the trajectories and final positions of UGVs for ground truth, estimates, and control commands."""
 
-    ax.legend()
+    # Create subplots for trajectories
+    nrows = int(np.ceil(num_robots / 2))  # Number of rows needed
+    ncols = 2  # Fixed number of columns for the layout
+    fig, axes = plt.subplots(nrows, ncols, figsize=(12, 5 * nrows))
+    axes = axes.flatten()  # Flatten the 2D array of axes for easier indexing
 
-    # Initialize function for the animation
-    def init():
-        ground_truth_scatter.set_offsets(np.empty((0, 2)))  # Empty 2D array
-        estimates_scatter.set_offsets(np.empty((0, 2)))  # Empty 2D array
-        return ground_truth_scatter, estimates_scatter
+    # Define colors for each robot using a colormap
+    colors = plt.cm.viridis(np.linspace(0, 1, num_robots))  # Create a colormap with distinct colors
 
-    # Update function for each frame
-    def update(frame):
-        if frame < len(ugvs):
-            ground_truth_scatter.set_offsets(np.array(ugvs[frame]).reshape(-1, 2))  # Ensure 2D shape
-        if frame < len(estimates):
-            estimates_scatter.set_offsets(np.array(estimates[frame]).reshape(-1, 2))  # Ensure 2D shape
-        return ground_truth_scatter, estimates_scatter
+    # Loop through each robot to create individual subplots for trajectories
+    for i in range(num_robots):
+        start_index = i * samples_per_robot
+        end_index = start_index + samples_per_robot
+        
+        # Plot ground truth trajectory
+        axes[i].plot(ground_truth[start_index:end_index, 0], 
+                     ground_truth[start_index:end_index, 1], 
+                     color=colors[i], alpha=0.5, label='Ground Truth')
+        axes[i].scatter(ground_truth[end_index - 1, 0], 
+                        ground_truth[end_index - 1, 1], 
+                        color=colors[i], marker='o', label='Final Ground Truth Position')
 
-    # Create the animation
-    ani = FuncAnimation(fig, update, frames=num_steps, init_func=init, blit=True, repeat=False)
+        # Plot estimated trajectory
+        axes[i].plot(estimates[start_index:end_index, 0], 
+                      estimates[start_index:end_index, 1], 
+                      color=colors[i], linestyle='--', alpha=0.5, label='Estimates')
+        axes[i].scatter(estimates[end_index - 1, 0], 
+                        estimates[end_index - 1, 1], 
+                        color=colors[i], marker='x', label='Final Estimate Position')
 
-    plt.show()  # Display the animation
+        # Set titles and labels for each subplot
+        if i == 0:
+            axes[i].set_title('Leader Robot Trajectory', fontsize=14)
+        else:
+            axes[i].set_title(f'Follower Robot {i}', fontsize=14)
 
-def plot_final_states(ground_truth, estimates):
-    """Plot the final positions of UGVs for ground truth and estimates."""
-    plt.figure(figsize=(8, 6))
-    
-    # Check if inputs are not empty
-    if ground_truth.size == 0 or estimates.size == 0:
-        print("No data to plot.")
-        return
-    
-    plt.scatter(ground_truth[:, 0], ground_truth[:, 1], color='b', label='Ground Truth', marker='o')
-    plt.scatter(estimates[:, 0], estimates[:, 1], color='g', label='Estimates', marker='x')
-    
-    plt.title("Final Positions of UGVs")
-    plt.xlabel("X Position")
-    plt.ylabel("Y Position")
-    plt.grid()
-    plt.legend()
-    plt.axis('equal')
+        axes[i].set_xlabel("X Position", fontsize=12)
+        axes[i].set_ylabel("Y Position", fontsize=12)
+        axes[i].grid()
+        axes[i].axis('equal')
+        axes[i].legend()
+
+    # Handle any unused subplots if the number of robots is not a multiple of 2
+    for j in range(num_robots, nrows * ncols):
+        fig.delaxes(axes[j])  # Remove any empty subplots
+
+    plt.tight_layout(pad=6.0)
+    plt.subplots_adjust(top=0.90, hspace=0.8, wspace=0.6)
+    plt.suptitle("Event-based CKF for Multi-Robot Localization in Sparse Sensing Graph and Adversarial Environment \n UGV Trajectories and Final Positions", fontsize=16)
     plt.show()
+
+    # Create a new figure for X localization with respect to sample time
+    time = np.arange(samples_per_robot)  # Sample time based on number of samples
+    fig, axes_x = plt.subplots(nrows, ncols, figsize=(12, 5 * nrows))
+    axes_x = axes_x.flatten()
+
+    # Loop through each robot to create subplots for X coordinates
+    for i in range(num_robots):
+        start_index = i * samples_per_robot
+        end_index = start_index + samples_per_robot
+        
+        # Plot X coordinate vs sample time
+        axes_x[i].plot(time, ground_truth[start_index:end_index, 0], color=colors[i], alpha=0.5, label='Ground Truth X')
+        axes_x[i].plot(time, estimates[start_index:end_index, 0], linestyle='--', color=colors[i], alpha=0.5, label='Estimate X')
+
+        # Set titles and labels for each subplot
+        if i == 0:
+            axes_x[i].set_title('Leader Robot X Coordinate over Time', fontsize=14)
+        else:
+            axes_x[i].set_title(f'Follower Robot {i} X Coordinate over Time', fontsize=14)
+
+        axes_x[i].set_xlabel("Sample Time", fontsize=12)
+        axes_x[i].set_ylabel("X Position", fontsize=12)
+        axes_x[i].grid()
+        axes_x[i].legend()
+
+    # Handle any unused subplots if the number of robots is not a multiple of 2
+    for j in range(num_robots, nrows * ncols):
+        fig.delaxes(axes_x[j])  # Remove any empty subplots
+
+    plt.tight_layout(pad=6.0)
+    plt.subplots_adjust(top=0.90, hspace=0.8, wspace=0.6)
+    plt.suptitle("Event-based CKF for Multi-Robot Localization in Sparse Sensing Graph and Adversarial Environment \n X Coordinate Localization over Time", fontsize=16)
+    plt.show()
+
+    # Create a new figure for Y localization with respect to sample time
+    fig, axes_y = plt.subplots(nrows, ncols, figsize=(12, 5 * nrows))
+    axes_y = axes_y.flatten()
+
+    # Loop through each robot to create subplots for Y coordinates
+    for i in range(num_robots):
+        start_index = i * samples_per_robot
+        end_index = start_index + samples_per_robot
+        
+        # Plot Y coordinate vs sample time
+        axes_y[i].plot(time, ground_truth[start_index:end_index, 1], color=colors[i], alpha=0.5, label='Ground Truth Y')
+        axes_y[i].plot(time, estimates[start_index:end_index, 1], linestyle='--', color=colors[i], alpha=0.5, label='Estimate Y')
+
+        # Set titles and labels for each subplot
+        if i == 0:
+            axes_y[i].set_title('Leader Robot Y Coordinate over Time', fontsize=14)
+        else:
+            axes_y[i].set_title(f'Follower Robot {i} Y Coordinate over Time', fontsize=14)
+
+        axes_y[i].set_xlabel("Sample Time", fontsize=12)
+        axes_y[i].set_ylabel("Y Position", fontsize=12)
+        axes_y[i].grid()
+        axes_y[i].legend()
+
+    # Handle any unused subplots if the number of robots is not a multiple of 2
+    for j in range(num_robots, nrows * ncols):
+        fig.delaxes(axes_y[j])  # Remove any empty subplots
+
+    plt.tight_layout(pad=6.0)
+    plt.subplots_adjust(top=0.90, hspace=0.8, wspace=0.6)
+    plt.suptitle("Event-based CKF for Multi-Robot Localization in Sparse Sensing Graph and Adversarial Environment \n Y Coordinate Localization over Time", fontsize=16)
+    plt.show()
+
+    # Calculate and plot mean square error (MSE) for localization
+    mse = np.zeros((num_robots, samples_per_robot))
+    for i in range(num_robots):
+        start_index = i * samples_per_robot
+        end_index = start_index + samples_per_robot
+        
+        # Calculate MSE for each sample
+        mse[i, :] = np.mean((ground_truth[start_index:end_index, :2] - estimates[start_index:end_index, :2])**2, axis=1)
+
+    # Create a new figure for localization error
+    fig, axes_mse = plt.subplots(nrows, ncols, figsize=(12, 5 * nrows))
+    axes_mse = axes_mse.flatten()
+
+    # Loop through each robot to create subplots for MSE
+    for i in range(num_robots):
+        axes_mse[i].plot(time, mse[i, :], color=colors[i], label='Localization Error (MSE)', alpha=0.7)
+        
+        # Set titles and labels for each subplot
+        if i == 0:
+            axes_mse[i].set_title('Leader Robot Localization Error (MSE)', fontsize=14)
+        else:
+            axes_mse[i].set_title(f'Follower Robot {i} Localization Error (MSE)', fontsize=14)
+
+        axes_mse[i].set_xlabel("Sample Time", fontsize=12)
+        axes_mse[i].set_ylabel("Mean Square Error", fontsize=12)
+        axes_mse[i].grid()
+        axes_mse[i].legend()
+
+    # Handle any unused subplots if the number of robots is not a multiple of 2
+    for j in range(num_robots, nrows * ncols):
+        fig.delaxes(axes_mse[j])  # Remove any empty subplots
+
+    plt.tight_layout(pad=6.0)
+    plt.subplots_adjust(top=0.90, hspace=0.8, wspace=0.6)
+    plt.suptitle("Event-based CKF for Multi-Robot Localization in Sparse Sensing Graph and Adversarial Environment \n Localization Error in Mean Square (MSE)", fontsize=16)
+    plt.show()
+
+    # Calculate and plot the average localization error (MSE) across all robots
+    avg_mse = np.mean(mse, axis=0)
+    
+    fig_avg_mse, ax_avg_mse = plt.subplots(figsize=(12, 6))
+    ax_avg_mse.plot(time, avg_mse, color='blue', label='Average Localization Error (MSE)', alpha=0.7)
+    
+    ax_avg_mse.set_title('Event-based CKF for Multi-Robot Localization in Sparse Sensing Graph and Adversarial Environment \n Average Localization Error (MSE) Across Robots', fontsize=16)
+    ax_avg_mse.set_xlabel('Sample Time', fontsize=14)
+    ax_avg_mse.set_ylabel('Mean Square Error', fontsize=14)
+    ax_avg_mse.grid()
+    ax_avg_mse.legend()
+    
+    plt.tight_layout()
+    plt.show()
+
+    # Create a new figure for control commands
+    fig, axes_control = plt.subplots(nrows, ncols, figsize=(12, 5 * nrows))
+    axes_control = axes_control.flatten()
+
+    # Loop through each robot to create subplots for control commands
+    for i in range(num_robots):
+        start_index = i * samples_per_robot
+        end_index = start_index + samples_per_robot
+        
+        # Extract control commands
+        linear_velocity = control_command[start_index:end_index, 0]
+        angular_velocity = control_command[start_index:end_index, 1]
+
+        # Plot linear velocity
+        axes_control[i].plot(time, linear_velocity, color='green', label='Linear Velocity', alpha=0.7)
+        if i == 0:
+            axes_control[i].set_title('Leader Robot Control Commands', fontsize=14)
+        else:
+            axes_control[i].set_title(f'Follower Robot {i} Control Commands', fontsize=14)
+        axes_control[i].set_xlabel("Sample Time", fontsize=12)
+        axes_control[i].set_ylabel("Velocity", fontsize=12)
+        axes_control[i].grid()
+
+        # Create a second y-axis for angular velocity
+        ax2 = axes_control[i].twinx()
+        ax2.plot(time, angular_velocity, color='orange', label='Angular Velocity', alpha=0.7)
+        ax2.set_ylabel("Angular Velocity", fontsize=12)
+        
+        # Combine legends from both axes
+        axes_control[i].legend(loc='upper left')
+        ax2.legend(loc='upper right')
+
+    # Handle any unused subplots if the number of robots is not a multiple of 2
+    for j in range(num_robots, nrows * ncols):
+        fig.delaxes(axes_control[j])  # Remove any empty subplots
+
+    plt.tight_layout(pad=6.0)
+    plt.subplots_adjust(top=0.90, hspace=0.8, wspace=0.6)
+    plt.suptitle("Event-based CKF for Multi-Robot Localization in Sparse Sensing Graph and Adversarial Environment \n Control Commands for Robots", fontsize=16)
+    plt.show()
+
+
 
 
 
@@ -1095,7 +1307,6 @@ if __name__ == "__main__":
         shadow_range_measurement=shadow_range_measurement,
         leader_control_policy=leader_control_policy,
         follower_control_policy=follower_control_policy,
-        animate=animate,
         plot_final_states=plot_final_states,
         do_s_attack_probability=0.1,  # Example probability for DoS attack
         fdi_attack_probability=0.2,   # Example probability for FDI attack
