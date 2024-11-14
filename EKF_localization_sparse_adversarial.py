@@ -23,10 +23,10 @@ CONFIG = {
     "TOTAL_ROBOTS": 20,
     
     # Standard deviation of noise added to control inputs.
-    "CONTROL_NOISE_STD": 0.00005,
+    "CONTROL_NOISE_STD": 0.1,
     
     # Covariance matrix representing the process noise in the system.
-    "PROCESS_NOISE_COVARIANCE": np.eye(2) * 0.0001,  # 2x2 identity matrix scaled by 0.01.
+    "PROCESS_NOISE_COVARIANCE": np.eye(2) * 0.1,  # 2x2 identity matrix scaled by 0.01.
     
     # Threshold for triggering events in the control strategy.
     "EVENT_TRIGGER_THRESHOLD": 0.1,
@@ -38,7 +38,7 @@ CONFIG = {
     "RANGE_NOISE_STD": 0.1,
     
     # Standard deviation of noise in bearing measurements.
-    "BEARING_NOISE_STD": 0.05,
+    "BEARING_NOISE_STD": 0.1,
     
     # Operational area limits for the x-coordinate.
     "x_limits": (-2, 2),
@@ -82,7 +82,7 @@ CONFIG = {
     "SAFE_DISTANCE": 0.01,  # Minimum distance robots should maintain to avoid collisions.
 
     # Gain for the control barrier function (CBF) to ensure collision avoidance.
-    "cbf_gain": 0.01,
+    "cbf_gain": 0.1,
 
     # Index of the leader robot (typically the first robot).
     "LEADER_INDEX": 0,
@@ -120,9 +120,9 @@ CONFIG = {
 
 # Global Variables for Attack Detection
 consecutive_large_innovations = 0
-attack_threshold = 2.0  # Threshold for detecting an attack
-benign_threshold = 1.0   # Threshold for benign detection
-steps_for_attack = 3     # Steps needed to confirm an attack
+attack_threshold = 10.0  # Threshold for detecting an attack
+benign_threshold = 15.0   # Threshold for benign detection
+steps_for_attack = 1     # Steps needed to confirm an attack
 state = "normal"         # Initial state
 
 # Initialize Arrays for Innovations and Adaptive Thresholds
@@ -189,7 +189,7 @@ State = 0
 
 
 
-def generate_spline_waypoints(initial_position, num_waypoints=10):
+def generate_spline_waypoints(initial_position, num_waypoints=5):
     # Define control points for the spline
     control_points_x = np.linspace(initial_position[0], 1, num_waypoints)
     
@@ -201,7 +201,7 @@ def generate_spline_waypoints(initial_position, num_waypoints=10):
     cs = CubicSpline(control_points_x, control_points_y)
 
     # Generate the waypoints from the spline
-    x_waypoints = np.linspace(control_points_x[0], control_points_x[-1], num_waypoints * 10)  # More points for smoothness
+    x_waypoints = np.linspace(control_points_x[0], control_points_x[-1], num_waypoints * 5)  # More points for smoothness
     y_waypoints = cs(x_waypoints)
 
     # Ensure the waypoints stay within operational limits
@@ -544,8 +544,6 @@ def H_jacobian(current_pose, nearby_pose):
         
         q = np.sqrt((lx - rx) ** 2 + (ly - ry) ** 2)
         
-        if q == 0:
-            raise ValueError("The distance q cannot be zero, as it leads to division by zero in H_jacobian.")
         
         # Calculate Jacobians
         H_r = (1 / q) * np.array([
@@ -969,7 +967,7 @@ def event_triggered(innovation, prev_innovation, threshold=None, decay_factor=0.
 
 
 
-def attack_detected(innovation, threshold=1.0):
+def attack_detected(innovation, threshold=0.1):
     # Ensure this variable is initialized before use
     global consecutive_large_innovations
     if 'consecutive_large_innovations' not in globals():
@@ -982,21 +980,38 @@ def attack_detected(innovation, threshold=1.0):
         consecutive_large_innovations = 0
     
     # Define the condition for attack detection
-    return consecutive_large_innovations > 5
+    return consecutive_large_innovations > steps_for_attack
 
 
 
-def get_neighbors(i, total_robots, shadow=False):
-    """Simulate neighbors and shadow neighbors for robot i."""
-    neighbors = []
-    shadow_neighbors = []
-    for j in range(total_robots):
-        if i != j:  # Exclude self
-            if np.linalg.norm(x_hat[:, i] - x_hat[:, j]) <  CONFIG["regular_sensing_range"]:
-                neighbors.append(j)
-            elif shadow and np.linalg.norm(x_hat[:, i] - x_hat[:, j]) < CONFIG["shadow_sensing_range"]:
-                shadow_neighbors.append(j)
-    return neighbors, shadow_neighbors
+def create_laplacian_matrix(total_robots, ground_truth):
+    """Create the Laplacian matrix based on ground_truth and sensing range."""
+    
+    # Initialize the adjacency matrix
+    A = np.zeros((total_robots, total_robots))
+    shadow = True
+
+    # Fill the adjacency matrix based on the sensing range and shadow
+    for i in range(total_robots):
+        for j in range(total_robots):
+            if i != j:  # Exclude self
+                distance = np.linalg.norm(ground_truth[:, i] - ground_truth[:, j])
+                
+                # Regular neighbors based on regular sensing range
+                if distance < CONFIG["regular_sensing_range"]:
+                    A[i, j] = 1
+                
+                # Shadow neighbors if the flag is True and within shadow sensing range
+                if shadow and CONFIG["shadow_sensing_range"] is not None and distance < CONFIG["shadow_sensing_range"]:
+                    A[i, j] = 1
+
+    # Compute the degree matrix D
+    D = np.diag(np.sum(A, axis=1))  # Sum along rows to get the degree of each node
+
+    # Laplacian matrix L = D - A
+    L = D - A
+
+    return L
 
 
 # Assuming you have a function to initialize robots
@@ -1069,10 +1084,56 @@ def initialize_headings(num_robots, initial_leader_heading=0):
 
     return headings
 
+def topological_neighbors(L, agent, ground_truth):
+    """ 
+    Returns the regular and shadow neighbors of a particular agent using the graph Laplacian.
+    
+    L: NxN numpy array (representing the graph Laplacian)
+    agent: int (agent: 0 - N-1)
+    regular_sensing_range: float (distance for regular neighbors)
+    shadow_sensing_range: float (distance for shadow neighbors)
+    ground_truth: Nx3 numpy array (positions [x, y, theta] of robots)
+
+    -> 1xM numpy arrays (regular_neighbors, shadow_neighbors)
+    """
+    # Validate the inputs
+    assert isinstance(L, np.ndarray), f"In the topological_neighbors function, the graph Laplacian (L) must be a numpy ndarray. Received type {type(L).__name__}."
+    assert isinstance(agent, int), f"In the topological_neighbors function, the agent number (agent) must be an integer. Received type {type(agent).__name__}."
+    assert isinstance(CONFIG["regular_sensing_range"], (int, float)), "Sensing ranges must be numeric."
+    assert isinstance(CONFIG["shadow_sensing_range"], (int, float)), "Sensing ranges must be numeric."
+    
+    # Validate agent index
+    assert agent >= 0, f"In the topological_neighbors function, the agent number (agent) must be greater than or equal to zero. Received {agent}."
+    assert agent < L.shape[0], f"In the topological_neighbors function, the agent number (agent) must be within the dimension of the provided Laplacian (L). Received agent number {agent} and Laplacian size {L.shape[0]} by {L.shape[1]}."
+
+    # Extract the row corresponding to the agent
+    row = L[agent, :]
+
+    # Set the self-connection to zero (since the agent is not its own neighbor)
+    row[agent] = 0
+
+    # Initialize lists for regular and shadow neighbors
+    regular_neighbors = []
+    shadow_neighbors = []
+
+    # Loop through all other agents to determine neighbors
+    for j in range(L.shape[0]):
+        if j != agent:
+            # Calculate Euclidean distance between agents i and j
+            dist = np.linalg.norm(ground_truth[:, agent] - ground_truth[:, j])
+
+            # Regular neighbor: within the regular sensing range
+            if dist < CONFIG["regular_sensing_range"]:
+                regular_neighbors.append(j)
+            # Shadow neighbor: within the shadow sensing range but outside regular range
+            elif dist < CONFIG["shadow_sensing_range"]:
+                shadow_neighbors.append(j)
+                
+    return np.array(regular_neighbors), np.array(shadow_neighbors)
 
 def run_simulation(robotarium_env, CONFIG, x_hat, P_self, P_cross, positions, target_positions, 
                    apply_process_noise, time_update, measurement_function, 
-                   measurement_update, attack_detected, get_neighbors, event_triggered, 
+                   measurement_update, attack_detected, topological_neighbors, event_triggered, 
                    generate_initial_positions, range_measurement, bearing_measurement, 
                    shadow_range_measurement,  # New shadow measurement functions
                    leader_control_policy, follower_control_policy, 
@@ -1125,6 +1186,11 @@ def run_simulation(robotarium_env, CONFIG, x_hat, P_self, P_cross, positions, ta
     # For computational/memory reasons, initialize the velocity vector
     dxi = np.zeros((2,CONFIG["TOTAL_ROBOTS"]))
 
+
+    leader_index = 0  # Leader is robot 0
+    d_min = CONFIG["SAFE_DISTANCE"]  # Minimum safe distance to avoid collisions
+
+
     ground_truth = r.get_poses()
 
     leader_index = 0  # Leader is robot 0
@@ -1141,15 +1207,13 @@ def run_simulation(robotarium_env, CONFIG, x_hat, P_self, P_cross, positions, ta
     rows = []
     cols = []
 
-    # Populate rows and cols based on bidirectional neighbors
+    # Populate rows and cols based on neighbors
     for i in range(CONFIG["TOTAL_ROBOTS"]):
-        # Get the neighbors for robot i
-        neighbors, _ = get_neighbors(i, CONFIG["TOTAL_ROBOTS"], shadow=False)
+        L = create_laplacian_matrix(CONFIG["TOTAL_ROBOTS"], ground_truth)
+        neighbors, _ = topological_neighbors(L, i, ground_truth)
         for neighbor in neighbors:
-            # Check if the neighbor also sees i (bidirectional edge)
-            if i in get_neighbors(neighbor, CONFIG["TOTAL_ROBOTS"], shadow=False)[0]:
-                rows.append(i)        # Current robot index
-                cols.append(neighbor)  # Neighbor robot index
+            rows.append(i)        # Current robot index
+            cols.append(neighbor)  # Neighbor robot index
 
     # Convert rows and cols to numpy arrays for easier indexing
     rows = np.array(rows)
@@ -1159,7 +1223,7 @@ def run_simulation(robotarium_env, CONFIG, x_hat, P_self, P_cross, positions, ta
     line_leader, = r.axes.plot(
         [ground_truth[0, leader_index], ground_truth[0, follower_indices[0]]],
         [ground_truth[1, leader_index], ground_truth[1, follower_indices[0]]],
-        linewidth=0.5, color='r', zorder=-1
+        linewidth=0.1, color='r', zorder=-1
     )
 
     leader_label = r.axes.text(
@@ -1178,13 +1242,13 @@ def run_simulation(robotarium_env, CONFIG, x_hat, P_self, P_cross, positions, ta
             continue
 
         # Create lines for each follower's connections
-        neighbors, _ = get_neighbors(follower_index, CONFIG["TOTAL_ROBOTS"])
+        neighbors, _ = topological_neighbors(L, i, ground_truth)
         for neighbor in neighbors:
             if neighbor < ground_truth.shape[1]:
                 line_follower, = r.axes.plot(
                     [ground_truth[0, follower_index], ground_truth[0, neighbor]],
                     [ground_truth[1, follower_index], ground_truth[1, neighbor]],
-                    linewidth=1, color='b', zorder=-1
+                    linewidth=0.1, color='b', zorder=-1
                 )
                 line_followers.append(line_follower)  # Store reference to the line object
 
@@ -1236,20 +1300,10 @@ def run_simulation(robotarium_env, CONFIG, x_hat, P_self, P_cross, positions, ta
 
     # Simulation Loop
     for step in range(CONFIG["num_steps"]):  
-        logging.debug(f"Step {step + 1}/{CONFIG['num_steps']}")
 
         # Step the Robotarium environment
         ground_truth = r.get_poses()
-        logging.debug(f"Ground truth generated: {ground_truth}")
-
-
-
-        # Step the simulation forward
-        r.step()
-        #plt.pause(0.01)  # Pause for a brief moment to allow the plot to update
-
         xi = uni_to_si_states(ground_truth)
-
 
         # Recalculate distances, errors, and rho at each step
         distances, errors = calculate_distances_and_errors(ground_truth)
@@ -1265,15 +1319,17 @@ def run_simulation(robotarium_env, CONFIG, x_hat, P_self, P_cross, positions, ta
         logging.info(f"Robots affected by DoS attack: {dos_attacked_robots}")
 
         for i in range(CONFIG["TOTAL_ROBOTS"]):   
-            neighbors, shadow_neighbors = get_neighbors(i, CONFIG["TOTAL_ROBOTS"], shadow=True)
+
+            L = create_laplacian_matrix(CONFIG["TOTAL_ROBOTS"], ground_truth)
+            neighbors, shadow_neighbors = topological_neighbors(L, i, ground_truth)
             logging.info(f"Neighbors generated for robot {i}: {neighbors}")
+
             # Get positions of nearby UGVs (neighbors only)
             nearby_positions = np.array([x_hat[:2, j, step] for j in neighbors]) 
 
-
             # Compute regular range and bearing measurements
-            range_meas = range_measurement(x_hat[:2, i, step - 1], nearby_positions)
-            bearing_meas = bearing_measurement(x_hat[:2, i, step - 1], x_hat[2, i, step - 1], nearby_positions)
+            range_meas = range_measurement(ground_truth[:2, i], nearby_positions)
+            bearing_meas = bearing_measurement(ground_truth[:2, i], ground_truth[2, i], nearby_positions)
 
             # Compute shadow edge measurements
             shadow_neighbors_positions = np.array([x_hat[:2, j, step] for j in shadow_neighbors])
@@ -1304,7 +1360,6 @@ def run_simulation(robotarium_env, CONFIG, x_hat, P_self, P_cross, positions, ta
             # Initialize state before the loop if it's not already initialized
             if "state" not in locals():
                 state = 0  # Assuming 0 is the starting state or the initial index for waypoints
-
 
             headings_leader = 0.0
             headings_follower = initialize_headings(CONFIG["TOTAL_ROBOTS"])
@@ -1346,6 +1401,10 @@ def run_simulation(robotarium_env, CONFIG, x_hat, P_self, P_cross, positions, ta
                 # Plot followers
                 #plt.scatter(ground_truth[0, i], ground_truth[1, i], color='green', label='Follower' if i == 0 else "")
 
+            # Apply process noise to the control input for both leader and followers
+            dxi[:, i] = apply_process_noise(control_input, CONFIG)  # Apply noise to follower inputs
+            if i == CONFIG["LEADER_INDEX"]:
+                dxi[:, CONFIG["LEADER_INDEX"]] = apply_process_noise(control_input, CONFIG)  # Apply noise to leader input
 
             font_size_m = 12
             # Assume num_followers is defined to be the number of followers you expect
@@ -1399,17 +1458,6 @@ def run_simulation(robotarium_env, CONFIG, x_hat, P_self, P_cross, positions, ta
             waypoint_lines[0].set_xdata(waypoints[0])
             waypoint_lines[0].set_ydata(waypoints[1])
 
-
-            # Apply process noise to the control input for both leader and followers
-            dxi[:, i] = apply_process_noise(control_input, CONFIG)  # Apply noise to follower inputs
-            if i == CONFIG["LEADER_INDEX"]:
-                dxi[:, CONFIG["LEADER_INDEX"]] = apply_process_noise(control_input, CONFIG)  # Apply noise to leader input
-
-            # Apply control barriers, convert to unicycle, and set velocities
-            dxu = si_to_uni_dyn(dxi, ground_truth)  # Convert to unicycle dynamics
-            r.set_velocities(np.arange(CONFIG["TOTAL_ROBOTS"]), dxu)  # Update velocities for all robots
-
-
             control_input_noisy = apply_process_noise(control_input, CONFIG)
 
 
@@ -1433,17 +1481,15 @@ def run_simulation(robotarium_env, CONFIG, x_hat, P_self, P_cross, positions, ta
                     state_transition, F_jacobian, P_cross[:, :, i, step - 1]
                 )
 
-            # Update estimated states and covariance only if DoS attack is not active
-            if i not in dos_attacked_robots:
             # Count the number of nearby robots excluding the current robot i
-                number_of_nearby_robots = len([j for j in neighbors if j != i]) + len(shadow_neighbors)  # Include shadow neighbors
+            number_of_nearby_robots = len([j for j in neighbors if j != i]) + len(shadow_neighbors)  # Include shadow neighbors
 
             # Prepare shadow measurements and covariance
-                shadow_measurement = np.concatenate([shadow_range_meas])  # Include shadow measurements
-                shadow_R = MEASUREMENT_NOISE_COVARIANCE  # Use the same covariance for shadow measurements
+            shadow_measurement = np.concatenate([shadow_range_meas])  # Include shadow measurements
+            shadow_R = MEASUREMENT_NOISE_COVARIANCE  # Use the same covariance for shadow measurements
 
                 # Call the measurement_update function with all required arguments
-                x_hat_updated, P_self_updated, previous_innovation, updated_threshold = measurement_update(
+            x_hat_updated, P_self_updated, previous_innovation, updated_threshold = measurement_update(
                     x_hat_pred[:, i, step], 
                     P_self_pred[:, :, i, step], 
                     combined_measurements, 
@@ -1470,18 +1516,27 @@ def run_simulation(robotarium_env, CONFIG, x_hat, P_self, P_cross, positions, ta
             elif previous_innovation.size > 3:
                 previous_innovation = previous_innovation[:3] 
             adaptive_thresholds[i] = updated_threshold
-            print(x_hat[:, i, step], "x_hat[:, i, step]")
  
             positions[:, i, step] = x_hat[0:2, i, step]  # Update position based on the estimated state
   
-
+  
             # Update estimated positions for the next step
             ground_truth_positions.append(ground_truth[:, i])
             estimated_positions.append(x_hat[:, i, step])
-            control_command.append(control_input[:, np.newaxis])
-
-
-
+            control_command.append(control_input[:, np.newaxis])      
+            
+        norms = np.linalg.norm(dxi, 2, 0)
+        magnitude_limit = 0.15
+        idxs_to_normalize = (norms > magnitude_limit)
+        dxi[:, idxs_to_normalize] *= magnitude_limit/norms[idxs_to_normalize]
+        # Apply control barriers, convert to unicycle, and set velocities
+        dxi = si_barrier_cert(dxi, ground_truth[:2, :])
+        dxu = si_to_uni_dyn(dxi, ground_truth)
+       
+        r.set_velocities(np.arange(CONFIG["TOTAL_ROBOTS"]), dxu)  # Update velocities for all robots
+            # Step the simulation forward
+        r.step()
+    
     ground_truth_positions = np.array(ground_truth_positions)
     estimated_positions = np.array(estimated_positions)
     control_command = np.squeeze(np.array(control_command))
@@ -1496,7 +1551,6 @@ def run_simulation(robotarium_env, CONFIG, x_hat, P_self, P_cross, positions, ta
 
     # Clean up the Robotarium environment
     logging.info("Simulation completed.")
-
     #Call at end of script to print debug information and for your script to run on the Robotarium server properly
     r.call_at_scripts_end()
 
@@ -1745,7 +1799,7 @@ if __name__ == "__main__":
         measurement_function=measurement_function,
         measurement_update=measurement_update,
         attack_detected=attack_detected,
-        get_neighbors=get_neighbors,
+        topological_neighbors=topological_neighbors,
         event_triggered=event_triggered,
         generate_initial_positions=generate_initial_positions,
         range_measurement=range_measurement,
@@ -1754,10 +1808,10 @@ if __name__ == "__main__":
         leader_control_policy=leader_control_policy,
         follower_control_policy=follower_control_policy,
         plot_final_states=plot_final_states,
-        do_s_attack_probability=0.1,  # Example probability for DoS attack
-        fdi_attack_probability=0.1,   # Example probability for FDI attack
-        max_dos_robots=1,             # Example maximum number of robots affected by DoS attack
-        max_fdi_measurements=1       # Example maximum number of measurements affected by FDI attack
+        do_s_attack_probability=0.0,  # Example probability for DoS attack
+        fdi_attack_probability=0.0,   # Example probability for FDI attack
+        max_dos_robots=5,             # Example maximum number of robots affected by DoS attack
+        max_fdi_measurements=5       # Example maximum number of measurements affected by FDI attack
     )
 
     
