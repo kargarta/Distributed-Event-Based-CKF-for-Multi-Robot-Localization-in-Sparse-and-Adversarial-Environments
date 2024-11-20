@@ -11,6 +11,7 @@ from matplotlib.animation import FuncAnimation
 import logging
 from scipy.interpolate import CubicSpline
 from math import pi  # or import numpy as np and use np.pi
+from scipy.linalg import cholesky, eigvalsh
 
 # Configure Logging
 logging.basicConfig(level=logging.DEBUG,  # Set the log level
@@ -19,25 +20,25 @@ logging.basicConfig(level=logging.DEBUG,  # Set the log level
 # Configuration Constants
 CONFIG = {
     # Total number of robots in the system.
-    "TOTAL_ROBOTS": 20,
+    "TOTAL_ROBOTS": 10,
     
     # Standard deviation of noise added to control inputs.
-    "CONTROL_NOISE_STD": 0.1,
+    "CONTROL_NOISE_STD": 0.00001,
     
     # Covariance matrix representing the process noise in the system.
-    "PROCESS_NOISE_COVARIANCE": np.eye(3) * 0.1,  # 3x3 identity matrix scaled by 0.01.
+    "PROCESS_NOISE_COVARIANCE": np.eye(3) * 0.00001,  # 3x3 identity matrix scaled by 0.01.
     
     # Threshold for triggering events in the control strategy.
-    "EVENT_TRIGGER_THRESHOLD": 0.5,
+    "EVENT_TRIGGER_THRESHOLD": 0.01,
     
     # Small constant to avoid division by zero in calculations.
     "EPSILON": 1e-6,
     
     # Standard deviation of noise in range measurements.
-    "RANGE_NOISE_STD": 0.1,
+    "RANGE_NOISE_STD": 0.01,
     
     # Standard deviation of noise in bearing measurements.
-    "BEARING_NOISE_STD": 0.05,
+    "BEARING_NOISE_STD": 0.01,
     
     # Operational area limits for the x-coordinate.
     "x_limits": (-2, 2),
@@ -46,22 +47,10 @@ CONFIG = {
     "y_limits": (-2,2),
     
     # Dimensions of the target area for the robots.
-    "TARGET_AREA": (3, 3),
+    "TARGET_AREA": (2, 2),
     
     # Number of steps in the simulation or control loop.
-    "num_steps": 150,
-
-    # Proportional gain for the PID controller—controls response based on current error.
-    #"kp_leader": 10.0,
-    #"kp_follower": 100,  # Follower robots may have different dynamics.
-
-    # Integral gain for the PID controller—eliminates steady-state error.
-    #"ki_leader": 20,
-    #"ki_follower": 5,
-    
-    # Derivative gain for the PID controller—accounts for rate of change of error.
-    #"kd_leader": 20,
-    #"kd_follower": 3,
+    "num_steps": 180,
 
     # Time interval for each iteration of the control loop.
     "dt": 0.1,
@@ -75,7 +64,7 @@ CONFIG = {
     "previous_error_follower": np.zeros(2),
 
     # Limit for control input to prevent excessive values.
-    "CONTROL_INPUT_LIMIT": 2.0,
+    "CONTROL_INPUT_LIMIT": 2,
 
     # Minimum safe distance between robots to avoid collisions.
     "SAFE_DISTANCE": 0.01,  # Minimum distance robots should maintain to avoid collisions.
@@ -100,10 +89,10 @@ CONFIG = {
     "close_enough": 0.01, 
 
     # Regular Sensing range of robots
-    "regular_sensing_range": 2,
+    "regular_sensing_range": 6,
     
     # Shadow Sensing range of robots
-    "shadow_sensing_range": 3, 
+    "shadow_sensing_range": 7, 
 
     # distance between the wheel
     "b": 0.1,
@@ -131,7 +120,7 @@ x_range = CONFIG["x_limits"]
 y_range = CONFIG["y_limits"]
 
 # Generate Nearby Positions for Demonstration
-nearby_positions = np.random.rand(2, CONFIG["TOTAL_ROBOTS"]) * 10  # Random positions in a 10x10 area
+nearby_positions = 0.1*np.ones((2, CONFIG["TOTAL_ROBOTS"]))  
 
 # Measurement Noise Covariance
 num_nearby = nearby_positions.shape[1]
@@ -141,8 +130,24 @@ MEASUREMENT_NOISE_COVARIANCE = np.diag(
 )
 
 # Randomly Initialize Current Positions for Each UGV across num_steps
-positions = np.random.rand(2, CONFIG["TOTAL_ROBOTS"], CONFIG["num_steps"]) * 100  # Current positions in a 100x100 area
-target_positions = np.random.rand(2, CONFIG["TOTAL_ROBOTS"], CONFIG["num_steps"]) * 100  # Target positions in a 100x100 area
+
+# Define initial positions for all robots
+initial_positions = np.array([
+    [0.1, -0.85, -0.65, -0.45, -0.85, -0.65, -0.45, -0.85, -0.65, -0.45],
+    [0.1, -0.1,  -0.1,  -0.1,   0.1,   0.1,   0.1,   0.3,   0.3,   0.3],
+    [0.0,  0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0]
+])  # Shape: (3, TOTAL_ROBOTS)
+
+# Define nearby positions deterministically
+nearby_positions = initial_positions[:2, :]
+
+# Define positions for multiple time steps deterministically
+num_steps = CONFIG["num_steps"]
+positions = np.zeros((2, CONFIG["TOTAL_ROBOTS"], CONFIG["num_steps"]))
+
+# Populate positions with a systematic offset over time
+positions[:, :, 0] = initial_positions[:2, :]
+
 
 # Initialize Robotarium Environment
 robotarium_env = robotarium.Robotarium(number_of_robots=CONFIG["TOTAL_ROBOTS"], show_figure=True)
@@ -157,7 +162,7 @@ P_pred = np.zeros((3, 3, CONFIG["TOTAL_ROBOTS"],  CONFIG["num_steps"]))  # For t
 
 # Fill initial covariance matrices with identity matrices for the first time step
 for i in range(CONFIG["TOTAL_ROBOTS"]):
-    P_pred[:, :, i, 0] = np.eye(3)  # Initial covariance for the first time step
+    P_pred[:, :, i, 0] = 0.01*np.eye(3)  # Initial covariance for the first time step
 
 # Initialize State Estimates and Covariance Matrices
 x_hat = np.zeros((3, CONFIG["TOTAL_ROBOTS"], CONFIG["num_steps"]))  # State vector: [x, y, theta]
@@ -167,12 +172,12 @@ P = np.zeros((3, 3, CONFIG["TOTAL_ROBOTS"],  CONFIG["num_steps"]))  # For time-d
 
 # Fill initial covariance matrices with identity matrices for the first time step
 for i in range(CONFIG["TOTAL_ROBOTS"]):
-    P[:, :, i, 0] = np.eye(3)  # Initial covariance for the first time step
+    P[:, :, i, 0] = 0.01*np.eye(3)  # Initial covariance for the first time step
 
 
 
-# Control inputs (random initial values)
-control_inputs = np.random.rand(2, CONFIG["TOTAL_ROBOTS"]) * 0.1  # 2D control inputs (v, omega)
+# Control inputs (initial values)
+control_inputs = np.ones((2, CONFIG["TOTAL_ROBOTS"])) * 0.01  # 2D control inputs (v, omega)
 
 # Initialize leader state
 State = 0 
@@ -198,43 +203,6 @@ def generate_spline_waypoints(initial_position, num_waypoints=5):
     y_waypoints = np.clip(y_waypoints, -1, 1)
 
     return np.array([x_waypoints, y_waypoints])
-
-
-def pure_pursuit_control(current_position, waypoints, look_ahead_distance=0.1):
-    """
-    Pure Pursuit Controller for tracking waypoints.
-    
-    Parameters:
-    - current_position: (2,) array of the leader's current x, y position
-    - waypoints: (2, N) array of x, y coordinates of the path
-    - look_ahead_distance: distance to look ahead on the path
-
-    Returns:
-    - control_input: velocity and heading angle to reach the target
-    """
-    x, y = current_position
-    target = None
-
-    # Find the look-ahead point
-    for waypoint in waypoints.T:
-        distance = np.linalg.norm(waypoint - current_position)
-        if distance >= look_ahead_distance:
-            target = waypoint
-            break
-
-    if target is None:
-        target = waypoints[:, -1]  # If no point meets the criterion, use the final point
-
-    # Calculate control input
-    angle_to_target = np.arctan2(target[1] - y, target[0] - x)
-    distance_to_target = np.linalg.norm(target - current_position)
-    
-    # Basic control policy: adjust speed based on distance and angle
-    velocity = 0.5 * distance_to_target  # Proportional speed control
-    steering_angle = angle_to_target
-
-    control_input = np.array([velocity, steering_angle])
-    return control_input
 
 
 def stanley_control(current_position, current_heading, waypoints, k=0.5):
@@ -282,8 +250,6 @@ def stanley_control(current_position, current_heading, waypoints, k=0.5):
     return control_input
 
 
-
-
 def generate_initial_positions(num_robots, x_range, y_range, initial_leader_position):
     """
     Generate initial positions for the robots in a grid pattern around the leader's initial position.
@@ -299,7 +265,7 @@ def generate_initial_positions(num_robots, x_range, y_range, initial_leader_posi
         np.ndarray: An array of shape (3, num_robots) containing the initial positions and orientations.
     """
 
-    grid_size = 5
+    grid_size = 3
     
     # Create an array to hold the initial positions of all robots
     initial_positions = np.zeros((3, num_robots))  # 3 rows for [x, y, theta]
@@ -310,8 +276,8 @@ def generate_initial_positions(num_robots, x_range, y_range, initial_leader_posi
     initial_positions[2, 0] = 0  # Leader's orientation set to 90 degrees (pi/2)
 
     # Calculate spacing for grid placement
-    spacing_x = 0.5*(x_range[1] - x_range[0]) / (grid_size + 1)  # Space between each robot in x-direction
-    spacing_y = 0.5*(y_range[1] - y_range[0]) / (grid_size + 1)  # Space between each robot in y-direction
+    spacing_x = 0.2*(x_range[1] - x_range[0]) / (grid_size + 1)  # Space between each robot in x-direction
+    spacing_y = 0.2*(y_range[1] - y_range[0]) / (grid_size + 1)  # Space between each robot in y-direction
 
     # Position the followers in a grid-like pattern
     follower_index = 1
@@ -319,12 +285,13 @@ def generate_initial_positions(num_robots, x_range, y_range, initial_leader_posi
         for col in range(grid_size):
             if follower_index < num_robots:
                 # Calculate the follower's position based on grid layout
-                initial_positions[0, follower_index] = initial_leader_position[0] + (col - grid_size // 2) * spacing_x - 1
+                initial_positions[0, follower_index] = initial_leader_position[0] + (col - grid_size // 2) * spacing_x - 0.75
                 initial_positions[1, follower_index] = initial_leader_position[1] + (row - grid_size // 2) * spacing_y 
                 initial_positions[2, follower_index] = 0  # Random orientation
                 follower_index += 1
 
     return initial_positions
+
 
 
 def generate_sigma_points(P, x_hat, alpha=1e-3, beta=2.0, kappa=0.0):
@@ -367,6 +334,8 @@ def generate_sigma_points(P, x_hat, alpha=1e-3, beta=2.0, kappa=0.0):
     return sigma_points
 
 
+
+
 def time_update(x_hat, P, Q, control_input, f):
     """Performs the UKF time update (prediction)."""
     logging.debug("Performing time update.")
@@ -382,89 +351,132 @@ def time_update(x_hat, P, Q, control_input, f):
     logging.info("Time update completed.")
     return x_hat_pred, P_pred
 
-def measurement_update(x_hat_pred, P_pred, measurement, R, h, nearby_positions, nearby_robots, index, 
+def measurement_update(x_hat_pred, P_pred, measurement, R, predicted_nearby_positions, P_pred_nearby, nearby_robots, shadow_robots, shadow_positions, index, 
                        previous_innovation, adaptive_threshold, shadow_measurement, shadow_R):
     """
     Performs the UKF measurement update (correction) with event-triggered communication and attack detection,
     considering both regular and shadow edge measurements.
     """
-    logging.debug(f"Performing measurement update for UGV {index}.")
-    
-    n = x_hat_pred.shape[0]
-    sigma_points = generate_sigma_points(P_pred, x_hat_pred)
 
-    # Propagate sigma points through the measurement function h for regular measurements
-    measurement_points = np.array([measurement_function(point, nearby_positions, index) for point in sigma_points])
+    n = x_hat_pred.shape[0]  # Number of states
+
+
+    
+    sigma_points = generate_sigma_points(P_pred, x_hat_pred)
+    
+
+    # Generate sigma points for neighboring robots' predicted positions
+    sigma_points_neighbors = []
+
+    for i in range(0, nearby_robots):  # Iterate over predicted positions of neighboring robots
+
+        sigma_points_neighbor = generate_sigma_points(P_pred_nearby[i, :, :], predicted_nearby_positions[i, :])
+        
+        sigma_points_neighbors.append(sigma_points_neighbor)
+    sigma_points_neighbors = np.array(sigma_points_neighbors)
+        # Propagate sigma points through the measurement function h for regular measurements
+    
+    sigma_points_neighbors_transposed = np.transpose(sigma_points_neighbors, axes=(1, 0, 2))
+    
+    measurement_points = []
+
+    for i in range(6):
+    
+        measurement_point = np.array([measurement_function(sigma_points[i], sigma_points_neighbors_transposed[i], index) ])
+
+        measurement_points.append(measurement_point)
+
+    measurement_points = np.array(measurement_points)
+    measurement_points = measurement_points.squeeze(axis=1)
+
 
     # Calculate predicted measurement mean and covariance for regular measurements
     z_hat_pred = np.mean(measurement_points, axis=0)
+
     covariance_matrix = np.cov(measurement_points, rowvar=False)
 
-    # Resize R for regular measurements
-    num_features = min(covariance_matrix.shape[0], 2 * nearby_robots)
-    R_resized = np.resize(R, (num_features, num_features))  # Resize R to match covariance submatrix
-    P_zz = covariance_matrix[:num_features, :num_features] + R_resized
+    # Adjust the dimensions of R for regular measurements
+    P_zz = covariance_matrix + R
 
-    # Initialize cross-covariance matrix P_xz for regular measurements
-    P_xz = np.zeros((n, num_features))  
-    for i in range(2 * n + 1):
-        outer_product = np.outer(sigma_points[i] - x_hat_pred, 
-                                 measurement_points[i, :num_features] - z_hat_pred[:num_features])
+    # Calculate cross-covariance matrix P_xz for regular measurements
+    P_xz = np.zeros((n, 2*nearby_robots ))  # Initialize with the shape (state_dim, measurement_dim)
+
+    for i in range(2 * n):
+        outer_product = np.outer(sigma_points[i] - x_hat_pred, measurement_points[i, : ] - z_hat_pred)
         P_xz += outer_product
-    P_xz /= (2 * n + 1)
+    P_xz /= (2 * n)
+
 
     # Regularization for P_zz
     if P_zz.size == 0:
-        logging.warning("P_zz is empty. Skipping update.")
-        return x_hat_pred, P_pred, previous_innovation, adaptive_threshold  # Handle appropriately
-    if np.linalg.cond(P_zz) > 1e10:
+        P_zz = R
+    elif np.linalg.cond(P_zz) > 1e10:
         P_zz += CONFIG["EPSILON"] * np.eye(P_zz.shape[0])
 
+
+    
     # Calculate Kalman gain for regular measurements
     K_regular = P_xz @ np.linalg.inv(P_zz)
-    innovation_regular = measurement[:num_features] - z_hat_pred[:num_features]
+
+    # Compute the innovation (residual) for regular measurements
+    innovation_regular = measurement - z_hat_pred
+    
 
     # Handle shadow measurements
+    # Propagate sigma points through the shadow measurement function
+    # Propagate sigma points through the shadow measurement function
+    # Make sure that `point` is reshaped correctly and `nearby_positions` has compatible dimensions
+
+
+    # Define your measurement function for shadow measurements
+    # Assuming point is of shape (3,) and nearby_positions is of shape (9, 2)
+# This assumes point represents a 3D position and you want to stack it appropriately
+
     shadow_measurement_points = np.array([
-        shadow_range_measurement(
-            positions={'v_i': point, 'h': nearby_positions},
-            distances=calculate_distances_and_errors(
-                np.column_stack((np.tile(point.reshape(1, -1), (nearby_positions.shape[0], 1)), nearby_positions))
-            )[0],
-            errors=calculate_distances_and_errors(
-                np.column_stack((np.tile(point.reshape(1, -1), (nearby_positions.shape[0], 1)), nearby_positions))
-            )[1],
-            rho=compute_rho(
-                np.column_stack((np.tile(point.reshape(1, -1), (nearby_positions.shape[0], 1)), nearby_positions)),
-                threshold=1
-            )
+    shadow_range_measurement(
+        positions={'v_i': point, 'h': nearby_positions},  # Use as is
+        distances=calculate_distances_and_errors(
+            np.column_stack((np.tile(point.reshape(1, -1), (shadow_positions.shape[0], 1)), shadow_positions))  # Repeat point for stacking
+        )[0],
+        errors=calculate_distances_and_errors(
+            np.column_stack((np.tile(point.reshape(1, -1), (shadow_positions.shape[0], 1)), shadow_positions))  # Repeat point for stacking
+        )[1],
+        rho=compute_rho(
+            np.column_stack((np.tile(point.reshape(1, -1), (shadow_positions.shape[0], 1)), shadow_positions)),
+            threshold=1
         )
-        for point in sigma_points
-    ])
+    )
+    for point in sigma_points
+])
+
 
     # Calculate predicted measurement mean and covariance for shadow measurements
-    if shadow_measurement_points.size > 0:
+    if  shadow_measurement_points.size > 0:  # Check if shadow_measurement_points is not empty
         shadow_z_hat_pred = np.mean(shadow_measurement_points, axis=0)
         shadow_covariance_matrix = np.cov(shadow_measurement_points, rowvar=False)
-        shadow_R_resized = np.resize(shadow_R, (num_features, num_features))
-        P_zz_shadow = shadow_covariance_matrix[:num_features, :num_features] + shadow_R_resized
+
+        # Adjust the dimensions of shadow_R
+        P_zz_shadow = shadow_covariance_matrix+ shadow_R
     else:
-        shadow_z_hat_pred = np.zeros(num_features)
-        P_zz_shadow = np.eye(num_features) * CONFIG["EPSILON"]
-        shadow_covariance_matrix = np.zeros((num_features, num_features))
+        # Handle case where there are no shadow measurement points
+        shadow_z_hat_pred = np.zeros(2*shadow_robots)  # Default prediction
+        P_zz_shadow = np.eye(2*shadow_robots) * CONFIG["EPSILON"]  # Small covariance to avoid singularity
+        shadow_covariance_matrix = np.zeros((2*shadow_robots, 2*shadow_robots))  # Default covariance
 
     # Calculate cross-covariance matrix P_xz for shadow measurements
-    P_xz_shadow = np.zeros((n, num_features))
-    if shadow_measurement_points.size > 0:
-        for i in range(2 * n + 1):
-            outer_product = np.outer(sigma_points[i] - x_hat_pred, 
-                                     shadow_measurement_points[i, :num_features] - shadow_z_hat_pred[:num_features])
+    P_xz_shadow = np.zeros((n, 2*shadow_robots))  # Initialize with the shape (state_dim, measurement_dim)
+    if  shadow_measurement_points.size > 0:  # Only compute if we have measurements
+        for i in range(2 * n):
+            outer_product = np.outer(sigma_points[i] - x_hat_pred, shadow_measurement_points[i, :] - shadow_z_hat_pred)
             P_xz_shadow += outer_product
-        P_xz_shadow /= (2 * n + 1)
+        P_xz_shadow /= (2 * n)
 
     # Regularization for P_zz_shadow
-    if np.linalg.cond(P_zz_shadow) > 1e10:
+    if P_zz_shadow.size == 0:
+        P_zz_shadow = shadow_R
+    elif np.linalg.cond(P_zz_shadow) > 1e10:
         P_zz_shadow += CONFIG["EPSILON"] * np.eye(P_zz_shadow.shape[0])
+
 
     # Calculate Kalman gain for shadow measurements (half of the regular)
     K_shadow = 0.5 * P_xz_shadow @ np.linalg.inv(P_zz_shadow)
@@ -480,16 +492,14 @@ def measurement_update(x_hat_pred, P_pred, measurement, R, h, nearby_positions, 
     attack_detection_repeated = 1 - np.repeat(attack_detection, 2)
     event_trigger_repeated = np.repeat(event_trigger, 2)
 
-    print(attack_detection_repeated, "attack_detection_repeated")
     # Adjusted broadcast operation for x_hat_updated
-    innovation_adjusted = K_regular @ (attack_detection_repeated * event_trigger_repeated * innovation_regular)
-    print(innovation_adjusted, "innovation_adjusted")
+    innovation_adjusted = K_regular @ ( innovation_regular)
     if shadow_measurement_points.size > 0:
         # Update state estimate
-        x_hat_updated = x_hat_pred + innovation_adjusted + K_shadow @ (attack_detection_repeated * event_trigger_repeated*(shadow_measurement - shadow_z_hat_pred))
+        x_hat_updated = x_hat_pred + innovation_adjusted 
 
         # Update covariance
-        P_updated = P_pred - K_regular @ P_zz @ K_regular.T - K_shadow @ P_zz_shadow @ K_shadow.T
+        P_updated = P_pred - K_regular @ P_zz @ K_regular.T 
 
     else:
         # If no shadow measurements are available, only use regular updates
@@ -500,10 +510,11 @@ def measurement_update(x_hat_pred, P_pred, measurement, R, h, nearby_positions, 
 
         # No event triggered, return the predicted values
         # Ensure covariance matrix remains symmetric and positive definite
-    P_updated = (P_updated + P_updated.T) / 2
-    P_updated += CONFIG["EPSILON"] * np.eye(n)
 
-    return x_hat_updated, P_updated, previous_innovation, adaptive_threshold
+
+    return x_hat_updated, P_updated, previous_innovation, adaptive_threshold, event_trigger, attack_detection
+            
+   
 
 
 
@@ -534,11 +545,8 @@ def state_transition(previousPose, ut):
     # Normalize results between [-pi, pi]
     currentTheta = normalizeAngle(currentTheta)
 
-    print(np.array([currentX, currentY, currentTheta]).shape, "np.array([currentX, currentY, currentTheta]).shape")
-
     # Create the output as a numpy array
     return np.array([currentX, currentY, currentTheta]).flatten()
-
 
 def normalizeAngle(originalAngle):
     """
@@ -634,7 +642,7 @@ def leader_control_policy(current_position, current_heading, positions, min_dist
     for i in range(1, config["TOTAL_ROBOTS"]):  # Avoid checking itself
         control_input = apply_cbf_control(control_input, current_position, positions[:, i], min_distance, config)
     
-    return control_input
+    return  control_input
 
 
 
@@ -677,7 +685,7 @@ def follower_control_policy(current_position, current_heading, desired_trajector
         if i != config["FOLLOWER_INDEX"]:  # Ensure we're not checking the current follower
             control_input = apply_cbf_control(control_input, current_position, positions[:, i], min_distance, config)
     
-    return control_input
+    return  control_input
 
 
 
@@ -735,34 +743,34 @@ def apply_process_noise(control_input, config):
     control_input_noisy = control_input + noise
     return control_input_noisy
 
-def range_measurement(own_position, nearby_positions):
+def range_measurement(robot_position, neighbor_positions):
     """
     Calculate the range measurement between the UGV's current position and nearby positions.
     """
-    own_position = own_position.reshape(-1)  # Ensure own_position is shape (2,)
-    
+
     # Check if there are any nearby positions
     if nearby_positions.shape[0] == 0:
         # If there are no nearby positions, return an empty array or handle accordingly
         return np.array([])  # Returning an empty array or you can handle this case as needed
 
-    ranges_to_nearby = np.linalg.norm(nearby_positions - own_position, axis=1)  # Shape: (N,)
+    ranges_to_nearby = np.linalg.norm(neighbor_positions[:, :2] - robot_position[:2], axis=1)   # Shape: (N,)
     ranges = np.concatenate([ranges_to_nearby])  # Combine distances
     return ranges
 
 
-def bearing_measurement(own_position, own_orientation, nearby_positions):
+def bearing_measurement(robot_position, neighbor_positions):
     """
     Calculates the bearing measurements to nearby UGVs and the initial position.
     """
+
     # Check if there are any nearby positions
-    if nearby_positions.shape[0] == 0:
+    if neighbor_positions.shape[0] == 0:
         # If there are no nearby positions, return an empty array or handle accordingly
         return np.array([])  # Returning an empty array or handle this case as needed
 
-    vectors_to_nearby = nearby_positions - own_position  # Shape: (N, 2)
+    vectors_to_nearby = neighbor_positions[:, :2] - robot_position[:2]  # Shape: (N, 2)
     angles_to_nearby = np.arctan2(vectors_to_nearby[:, 1], vectors_to_nearby[:, 0])
-    bearings = angles_to_nearby - own_orientation
+    bearings = angles_to_nearby - robot_position[2]
 
     bearings = np.arctan2(np.sin(bearings), np.cos(bearings))
     return bearings
@@ -866,19 +874,19 @@ def shadow_range_measurement(positions, distances, errors, rho):
 
 
 
-def measurement_function(robot_position, nearby_positions, index):
+def measurement_function(robot_position, neighbor_positions, index):
     """
     Constructs a measurement vector from the ground truth.
     """
-    current_position = robot_position[:2]  # Shape: (2,)
     
-    ranges = range_measurement(current_position, nearby_positions)
-    bearings = bearing_measurement(current_position, robot_position[2], nearby_positions)
+    ranges = range_measurement(robot_position, neighbor_positions)
+    bearings = bearing_measurement(robot_position, neighbor_positions)
     
     measurement = np.concatenate([ranges, bearings])
     return measurement
 
-def event_triggered(innovation, prev_innovation, threshold=None, decay_factor=0.95):
+
+def event_triggered(innovation, prev_innovation, threshold=None, decay_factor=0.0):
     """
     Checks if the event-triggered condition is met on each segment of the innovation array with an adaptive threshold.
     
@@ -937,7 +945,7 @@ def event_triggered(innovation, prev_innovation, threshold=None, decay_factor=0.
 # Initialize a dictionary to store consecutive large innovation counts for each pair
 consecutive_large_innovations = {}
 
-def attack_detected(innovation, threshold=0.1):
+def attack_detected(innovation, threshold=0.00):
     """
     Detects attacks in segments of the innovation array. Each segment (pair of elements)
     is checked to see if it consistently exceeds the threshold over a certain number of steps.
@@ -982,6 +990,10 @@ def attack_detected(innovation, threshold=0.1):
     return gamma
 
 
+
+
+
+
 def create_laplacian_matrix(total_robots, ground_truth):
     """Create the Laplacian matrix based on ground_truth and sensing range."""
     
@@ -1012,6 +1024,7 @@ def create_laplacian_matrix(total_robots, ground_truth):
     return L
 
 
+
 # Assuming you have a function to initialize robots
 def initialize_robots(r, leader_index, total_robots):
     # Colors: Red for leader, Green for followers
@@ -1020,6 +1033,7 @@ def initialize_robots(r, leader_index, total_robots):
     # Initialize each robot with its respective color
     for i in range(total_robots):
         r.set_color(i, colors[i])
+
 
 def determine_font_size(r, base_font_size):
     """
@@ -1129,7 +1143,9 @@ def topological_neighbors(L, agent, ground_truth):
                 
     return np.array(regular_neighbors), np.array(shadow_neighbors)
 
-def run_simulation(robotarium_env, CONFIG, x_hat, P, positions, target_positions, 
+
+
+def run_simulation(robotarium_env, CONFIG, x_hat, P, positions, 
                    apply_process_noise, time_update, measurement_function, 
                    measurement_update, attack_detected, topological_neighbors, event_triggered, 
                    generate_initial_positions, range_measurement, bearing_measurement, 
@@ -1171,8 +1187,13 @@ def run_simulation(robotarium_env, CONFIG, x_hat, P, positions, target_positions
     ground_truth_positions = []
     estimated_positions = []
     control_command = []
+    Event_Trigger = []
+    Attack_Detection = []
+    Neighbors = []
 
     initial_positions = generate_initial_positions(CONFIG["TOTAL_ROBOTS"], x_range, y_range, CONFIG["initial_leader_position"])
+    x_hat_pred[:, :, 0] = initial_positions
+    x_hat[:, :, 0] = initial_positions
 
     r = robotarium.Robotarium(number_of_robots=CONFIG["TOTAL_ROBOTS"], show_figure=True, initial_conditions=initial_positions, sim_in_real_time=True)
     _,uni_to_si_states = create_si_to_uni_mapping()
@@ -1190,6 +1211,7 @@ def run_simulation(robotarium_env, CONFIG, x_hat, P, positions, target_positions
 
 
     ground_truth = r.get_poses()
+
 
     leader_index = 0  # Leader is robot 0
     follower_indices = [i for i in range(1, CONFIG["TOTAL_ROBOTS"]) if i < ground_truth.shape[1]] 
@@ -1303,6 +1325,8 @@ def run_simulation(robotarium_env, CONFIG, x_hat, P, positions, target_positions
         ground_truth = r.get_poses()
         xi = uni_to_si_states(ground_truth)
 
+        initial_positions = generate_initial_positions(CONFIG["TOTAL_ROBOTS"], x_range, y_range, CONFIG["initial_leader_position"])
+
         # Recalculate distances, errors, and rho at each step
         distances, errors = calculate_distances_and_errors(ground_truth)
         rho = compute_rho(ground_truth)
@@ -1317,20 +1341,20 @@ def run_simulation(robotarium_env, CONFIG, x_hat, P, positions, target_positions
         logging.info(f"Robots affected by DoS attack: {dos_attacked_robots}")
 
         for i in range(CONFIG["TOTAL_ROBOTS"]):   
-
+            
             L = create_laplacian_matrix(CONFIG["TOTAL_ROBOTS"], ground_truth)
             neighbors, shadow_neighbors = topological_neighbors(L, i, ground_truth)
             logging.info(f"Neighbors generated for robot {i}: {neighbors}")
 
             # Get positions of nearby UGVs (neighbors only)
-            nearby_positions = np.array([x_hat[:2, j, step] for j in neighbors]) 
+            nearby_positions = np.array([ground_truth[:, j] for j in neighbors])
 
             # Compute regular range and bearing measurements
-            range_meas = range_measurement(ground_truth[:2, i], nearby_positions)
-            bearing_meas = bearing_measurement(ground_truth[:2, i], ground_truth[2, i], nearby_positions)
+            range_meas = range_measurement(ground_truth[:, i], nearby_positions)
+            bearing_meas = bearing_measurement(ground_truth[:, i], nearby_positions)
 
             # Compute shadow edge measurements
-            shadow_neighbors_positions = np.array([x_hat[:2, j, step] for j in shadow_neighbors])
+            shadow_neighbors_positions_predict = np.array([x_hat_pred[:2, j, step] for j in shadow_neighbors])
             shadow_ranges = {}  # Correctly initialize as a dictionary
             for j in range(CONFIG["TOTAL_ROBOTS"]):
             # Replace with actual range calculation logic
@@ -1421,17 +1445,20 @@ def run_simulation(robotarium_env, CONFIG, x_hat, P, positions, target_positions
                     # Check if the current follower is affected by DoS or FDI
                     if follower_indices[q] in dos_attacked_robots or follower_indices[q] in fdi_attacked_robots:
                         line_color = 'r'  # Set color to black if affected
+                        line_width = 0.1   # Thicker line for affected robots
                     else:
                         line_color = 'b'  # Set to blue if not affected
+                        line_width = 0.1   # Default line width for unaffected robots
 
                     # Update the data for the follower's line using valid indices
                     if q < len(rows) and q < len(cols):
                         line_followers[q].set_data(
                             [ground_truth[0, rows[q + 1]], ground_truth[0, cols[q + 1]]],
-                            [ground_truth[1, rows[q + 1]], ground_truth[1, cols[q + 1]]]
+                            [ground_truth[1, rows[q + 1]], ground_truth[1, cols[q + 1]]],
                         )
                          # Change color of follower line
                         line_followers[q].set_color(line_color)
+                        line_followers[q].set_linewidth(line_width)
 
             # Update leader position and line
             leader_label.set_position([xi[0, leader_index], xi[1, leader_index] + 0.15])
@@ -1439,12 +1466,15 @@ def run_simulation(robotarium_env, CONFIG, x_hat, P, positions, target_positions
 
             # Change color of leader line
             line_leader.set_color(line_color)
+            line_leader.set_linewidth(line_width)
 
             # Check if the leader is affected by DoS or FDI
             if leader_index in dos_attacked_robots or leader_index in fdi_attacked_robots:
                 line_color = 'r'  # Set color to black if affected
+                line_width = 0.1  # Thicker line for affected leader
             else:
                 line_color = 'k'  # Set to red if not affected
+                line_width = 0.1  # Default line width for unaffected leader
 
             # Update the data for the leader's line
             line_leader.set_data(
@@ -1452,16 +1482,22 @@ def run_simulation(robotarium_env, CONFIG, x_hat, P, positions, target_positions
                 [ground_truth[1, leader_index], ground_truth[1, follower_indices[0]]]
             )
 
+            
+
             # Plot the waypoints if needed
             waypoint_lines[0].set_xdata(waypoints[0])
             waypoint_lines[0].set_ydata(waypoints[1])
 
             control_input_noisy = apply_process_noise(control_input, CONFIG)
-
+           
 
             # Ensure control_input_noisy is 2D before setting velocities
             if control_input_noisy.ndim == 1:
                 control_input_noisy = control_input_noisy[:, np.newaxis]
+
+            if step >= 170:
+                control_input_noisy = [0,0]  # Set the last 5 samples to zero for all robots
+                x_hat[:, i, step-1] = x_hat[:, i, 170]
 
             # Check for DoS attack on specific robots
             if i in dos_attacked_robots:
@@ -1476,23 +1512,39 @@ def run_simulation(robotarium_env, CONFIG, x_hat, P, positions, target_positions
                     CONFIG["PROCESS_NOISE_COVARIANCE"], control_input_noisy, 
                     state_transition
                 )
-
             # Count the number of nearby robots excluding the current robot i
-            number_of_nearby_robots = len([j for j in neighbors if j != i]) + len(shadow_neighbors)  # Include shadow neighbors
+            number_of_nearby_robots = len([j for j in neighbors if j != i])
+        
+            number_of_shadow_robots = len(shadow_neighbors) 
+
+            MEASUREMENT_NOISE_COVARIANCE = np.diag(
+               [CONFIG["RANGE_NOISE_STD"]**2] * (number_of_nearby_robots ) + 
+               [CONFIG["BEARING_NOISE_STD"]**2] * (number_of_nearby_robots)
+            )
+
 
             # Prepare shadow measurements and covariance
             shadow_measurement = np.concatenate([shadow_range_meas])  # Include shadow measurements
-            shadow_R = MEASUREMENT_NOISE_COVARIANCE  # Use the same covariance for shadow measurements
+            shadow_R = np.diag(
+               [CONFIG["RANGE_NOISE_STD"]**2] * (number_of_shadow_robots ) + 
+               [CONFIG["BEARING_NOISE_STD"]**2] * (number_of_shadow_robots)
+            )
+            
+            nearby_positions_predict = np.array([x_hat_pred[:, j, step] for j in neighbors])  
+            P_pred_nearby = np.array([P_pred[:, :, j, step] for j in neighbors]) 
+
 
                 # Call the measurement_update function with all required arguments
-            x_hat_updated, P_updated, previous_innovation, updated_threshold = measurement_update(
+            x_hat_updated, P_updated, previous_innovation, updated_threshold, event_trigger, attack_detection = measurement_update(
                     x_hat_pred[:, i, step], 
-                    P_pred[:, :, i, step], 
+                    P_pred[:, :, i, step],
                     combined_measurements, 
                     MEASUREMENT_NOISE_COVARIANCE, 
-                    measurement_function(x_hat[:, i, step-1], nearby_positions, i), 
-                    nearby_positions, 
+                    nearby_positions_predict,
+                    P_pred_nearby,
                     number_of_nearby_robots, 
+                    number_of_shadow_robots,
+                    shadow_neighbors_positions_predict,
                     i, 
                     previous_innovations[:, i, step-1], 
                     adaptive_thresholds[i],
@@ -1503,7 +1555,6 @@ def run_simulation(robotarium_env, CONFIG, x_hat, P, positions, target_positions
             # Store the updated values back to the arrays
             x_hat[:, i, step] = x_hat_updated
             P[:, :, i, step] = P_updated
-            # If previous_innovation is not guaranteed to be (3,), handle it
             if previous_innovation.size == 2:
                 # You may want to append a zero or some default value
                 previous_innovation = np.append(previous_innovation, 0)
@@ -1516,7 +1567,12 @@ def run_simulation(robotarium_env, CONFIG, x_hat, P, positions, target_positions
             # Update estimated positions for the next step
             ground_truth_positions.append(ground_truth[:, i])
             estimated_positions.append(x_hat[:, i, step])
-            control_command.append(control_input[:, np.newaxis])      
+            control_command.append(control_input[:, np.newaxis]) 
+            Event_Trigger.append(event_trigger) 
+            Attack_Detection.append(attack_detection)
+            Neighbors.append(neighbors)
+
+
             
         norms = np.linalg.norm(dxi, 2, 0)
         magnitude_limit = 0.15
@@ -1525,6 +1581,8 @@ def run_simulation(robotarium_env, CONFIG, x_hat, P, positions, target_positions
         # Apply control barriers, convert to unicycle, and set velocities
         dxi = si_barrier_cert(dxi, ground_truth[:2, :])
         dxu = si_to_uni_dyn(dxi, ground_truth)
+        if step >= 170:
+             dxu[:, :] = 0  # Set the last 5 samples to zero for all robots
        
         r.set_velocities(np.arange(CONFIG["TOTAL_ROBOTS"]), dxu)  # Update velocities for all robots
             # Step the simulation forward
@@ -1533,19 +1591,22 @@ def run_simulation(robotarium_env, CONFIG, x_hat, P, positions, target_positions
     ground_truth_positions = np.array(ground_truth_positions)
     estimated_positions = np.array(estimated_positions)
     control_command = np.squeeze(np.array(control_command))
+    Event_Trigger = np.squeeze(np.array(Event_Trigger))
+    Attack_Detection = np.squeeze(np.array(Attack_Detection))
+    Neighbors = np.squeeze(np.array(Neighbors))
 
     # Finalizing the simulation
     logging.debug(f"Final step {step}: current positions {positions}")
-    
     plot_final_states(ground_truth_positions, estimated_positions, control_command,  CONFIG["TOTAL_ROBOTS"], CONFIG["num_steps"])
-
-    
+    #plot_event_trigger_and_attack_detection(Event_Trigger, Attack_Detection, CONFIG["TOTAL_ROBOTS"], CONFIG["num_steps"], Neighbors)
     input("Press Enter to close...")  # Pause until user input
-
     # Clean up the Robotarium environment
     logging.info("Simulation completed.")
     #Call at end of script to print debug information and for your script to run on the Robotarium server properly
     r.call_at_scripts_end()
+
+
+
 
 
 def plot_final_states(ground_truth, estimates, control_command, num_robots, samples_per_robot):
@@ -1587,8 +1648,8 @@ def plot_final_states(ground_truth, estimates, control_command, num_robots, samp
         else:
             axes[i].set_title(f'Follower Robot {i}', fontsize=14)
 
-        axes[i].set_xlabel("X Position", fontsize=12)
-        axes[i].set_ylabel("Y Position", fontsize=12)
+        axes[i].set_xlabel("X Position (m)", fontsize=12)
+        axes[i].set_ylabel("Y Position (m)", fontsize=12)
         axes[i].grid()
         axes[i].axis('equal')
         axes[i].legend()
@@ -1623,9 +1684,10 @@ def plot_final_states(ground_truth, estimates, control_command, num_robots, samp
             axes_x[i].set_title(f'Follower Robot {i} X Coordinate over Time', fontsize=14)
 
         axes_x[i].set_xlabel("Sample Time", fontsize=12)
-        axes_x[i].set_ylabel("X Position", fontsize=12)
+        axes_x[i].set_ylabel("X Position (m)", fontsize=12)
         axes_x[i].grid()
         axes_x[i].legend()
+
 
     # Handle any unused subplots if the number of robots is not a multiple of 2
     for j in range(num_robots, nrows * ncols):
@@ -1656,7 +1718,7 @@ def plot_final_states(ground_truth, estimates, control_command, num_robots, samp
             axes_y[i].set_title(f'Follower Robot {i} Y Coordinate over Time', fontsize=14)
 
         axes_y[i].set_xlabel("Sample Time", fontsize=12)
-        axes_y[i].set_ylabel("Y Position", fontsize=12)
+        axes_y[i].set_ylabel("Y Position (m)", fontsize=12)
         axes_y[i].grid()
         axes_y[i].legend()
 
@@ -1693,7 +1755,7 @@ def plot_final_states(ground_truth, estimates, control_command, num_robots, samp
             axes_mse[i].set_title(f'Follower Robot {i} Localization Error (MSE)', fontsize=14)
 
         axes_mse[i].set_xlabel("Sample Time", fontsize=12)
-        axes_mse[i].set_ylabel("Mean Square Error", fontsize=12)
+        axes_mse[i].set_ylabel("Mean Square Error (m)", fontsize=12)
         axes_mse[i].grid()
         axes_mse[i].legend()
 
@@ -1714,7 +1776,7 @@ def plot_final_states(ground_truth, estimates, control_command, num_robots, samp
     
     ax_avg_mse.set_title('Event-based UKF for Multi-Robot Localization in Sparse Sensing Graph and Adversarial Environment \n Average Localization Error (MSE) Across Robots', fontsize=16)
     ax_avg_mse.set_xlabel('Sample Time', fontsize=14)
-    ax_avg_mse.set_ylabel('Mean Square Error', fontsize=14)
+    ax_avg_mse.set_ylabel('Mean Square Error (m)', fontsize=14)
     ax_avg_mse.grid()
     ax_avg_mse.legend()
     
@@ -1765,6 +1827,70 @@ def plot_final_states(ground_truth, estimates, control_command, num_robots, samp
 
 
 
+def plot_event_trigger_and_attack_detection(event_trigger_data, attack_detection_data, num_robots, samples_per_robot, neighbors):
+    """Plot event trigger and attack detection data for each robot considering neighbors.
+    
+    Args:
+        event_trigger_data: Array of shape (samples_per_robot * num_robots,) containing event trigger data for each robot and each sample.
+        attack_detection_data: Array of shape (samples_per_robot * num_robots,) containing attack detection data for each robot and each sample.
+        neighbors: Array of shape (samples_per_robot * num_robots,), where each element is an array indicating the neighbors for each robot at each time step.
+        samples_per_robot: Integer, number of time samples per robot.
+        num_robots: Integer, total number of robots.
+    """
+    
+    num_samples = len(event_trigger_data)
+    
+    colors = ['red', 'green', 'blue', 'purple', 'magenta', 'orange', 'cyan', 'brown', 'pink', 'gray']
+
+    # Plot event trigger data with neighbors
+    fig_event, ax_event = plt.subplots(figsize=(10, 6))
+    for i in range(num_samples):
+        robot = (i // samples_per_robot) + 1  # Calculate robot number based on sample index
+        time_step = i % samples_per_robot     # Time step within each robot's sample
+        
+        # Plot the event trigger for the main robot
+        if np.any(event_trigger_data[i] == 1):
+            ax_event.scatter(time_step, robot, color=colors[(robot - 1) % len(colors)], alpha=0.7)
+
+        # Plot event triggers for each neighbor of this robot at this time step
+        for neighbor in neighbors[i]:
+            if np.any(event_trigger_data[i] == 1):
+                ax_event.scatter(time_step, neighbor, color=colors[(neighbor - 1) % len(colors)], marker='o', alpha=0.5, edgecolors='black')
+
+    ax_event.set_title('Triggering Instants of Robots (Event Trigger)', fontsize=16)
+    ax_event.set_xlabel('Time, k', fontsize=14)
+    ax_event.set_ylabel('Robot Number', fontsize=14)
+    ax_event.grid(True, linestyle='--', alpha=0.5)
+    ax_event.set_yticks(range(1, num_robots + 1))
+    ax_event.set_xlim(0, samples_per_robot - 1)  # Capture whole sample time
+    plt.tight_layout()
+    plt.show()
+
+    # Plot attack detection data with neighbors
+    fig_attack, ax_attack = plt.subplots(figsize=(10, 6))
+    for i in range(num_samples):
+        robot = (i // samples_per_robot) + 1  # Calculate robot number based on sample index
+        time_step = i % samples_per_robot     # Time step within each robot's sample
+
+        # Plot the attack detection for the main robot
+        if np.any(attack_detection_data[i] == 1):
+            ax_attack.scatter(time_step, robot, color=colors[(robot - 1) % len(colors)], marker='x', alpha=0.7)
+
+        # Plot attack detections for each neighbor of this robot at this time step
+        for neighbor in neighbors[i]:
+            if np.any(attack_detection_data[i] == 1):
+                ax_attack.scatter(time_step, neighbor, color=colors[(neighbor - 1) % len(colors)], marker='x', alpha=0.5, edgecolors='black')
+
+    ax_attack.set_title('Triggering Instants of Robots (Attack Detection)', fontsize=16)
+    ax_attack.set_xlabel('Time, k', fontsize=14)
+    ax_attack.set_ylabel('Robot Number', fontsize=14)
+    ax_attack.grid(True, linestyle='--', alpha=0.5)
+    ax_attack.set_yticks(range(1, num_robots + 1))
+    ax_attack.set_xlim(0, samples_per_robot - 1)  # Capture whole sample time
+    plt.tight_layout()
+    plt.show()
+
+
 # Call the run_simulation function to start
 if __name__ == "__main__":
     # Define distances, errors, and rho before calling run_simulation
@@ -1785,7 +1911,6 @@ if __name__ == "__main__":
         x_hat=x_hat,
         P=P,
         positions=positions,
-        target_positions=target_positions,
         apply_process_noise=apply_process_noise,
         time_update=time_update,
         measurement_function=measurement_function,
@@ -1800,15 +1925,10 @@ if __name__ == "__main__":
         leader_control_policy=leader_control_policy,
         follower_control_policy=follower_control_policy,
         plot_final_states=plot_final_states,
-        do_s_attack_probability=0.1,  # Example probability for DoS attack
-        fdi_attack_probability=0.1,   # Example probability for FDI attack
-        max_dos_robots=5,             # Example maximum number of robots affected by DoS attack
-        max_fdi_measurements=5       # Example maximum number of measurements affected by FDI attack
+        do_s_attack_probability=0.0,  # Example probability for DoS attack
+        fdi_attack_probability=0.0,   # Example probability for FDI attack
+        max_dos_robots=2,             # Example maximum number of robots affected by DoS attack
+        max_fdi_measurements=2      # Example maximum number of measurements affected by FDI attack
     )
 
     
-
-
-
-
-
