@@ -12,6 +12,8 @@ import logging
 from math import *
 from scipy.interpolate import CubicSpline
 from math import pi  # or import numpy as np and use np.pi
+import pandas as pd
+
 
 # Configure Logging
 logging.basicConfig(level=logging.DEBUG,  # Set the log level
@@ -23,10 +25,10 @@ CONFIG = {
     "TOTAL_ROBOTS": 10,
     
     # Standard deviation of noise added to control inputs.
-    "CONTROL_NOISE_STD": 0.00001,
+    "CONTROL_NOISE_STD": 0.001,
     
     # Covariance matrix representing the process noise in the system.
-    "PROCESS_NOISE_COVARIANCE": np.eye(2) * 0.00001,  # 2x2 identity matrix scaled by 0.01.
+    "PROCESS_NOISE_COVARIANCE": np.eye(2) * 0.0001,  # 2x2 identity matrix scaled by 0.01.
     
     # Threshold for triggering events in the control strategy.
     "EVENT_TRIGGER_THRESHOLD": 0.001,
@@ -35,10 +37,10 @@ CONFIG = {
     "EPSILON": 1e-6,
     
     # Standard deviation of noise in range measurements.
-    "RANGE_NOISE_STD": 0.01,
+    "RANGE_NOISE_STD": 100,
     
     # Standard deviation of noise in bearing measurements.
-    "BEARING_NOISE_STD": 0.01,
+    "BEARING_NOISE_STD": 100,
     
     # Operational area limits for the x-coordinate.
     "x_limits": (-2, 2),
@@ -50,10 +52,10 @@ CONFIG = {
     "TARGET_AREA": (2, 2),
     
     # Number of steps in the simulation or control loop.
-    "num_steps": 180,
+    "num_steps": 170,
 
     # Time interval for each iteration of the control loop.
-    "dt": 0.1,
+    "dt": 0.01,
     
     # Initialize the integral term for the PID controller (2D control).
     "integral_leader": np.zeros(2),
@@ -64,7 +66,7 @@ CONFIG = {
     "previous_error_follower": np.zeros(2),
 
     # Limit for control input to prevent excessive values.
-    "CONTROL_INPUT_LIMIT": 2.0,
+    "CONTROL_INPUT_LIMIT": 0.8,
 
     # Minimum safe distance between robots to avoid collisions.
     "SAFE_DISTANCE": 0.01,  # Minimum distance robots should maintain to avoid collisions.
@@ -164,8 +166,8 @@ P_cross_pred = np.zeros((3, 3, CONFIG["TOTAL_ROBOTS"],  CONFIG["num_steps"]))  #
 
 # Fill initial covariance matrices with identity matrices for the first time step
 for i in range(CONFIG["TOTAL_ROBOTS"]):
-    P_self_pred[:, :, i, 0] = 0.01*np.eye(3)  # Initial covariance for the first time step
-    P_cross_pred[:, :, i, 0] = 0.01*np.eye(3)  # Initial covariance for the first time step
+    P_self_pred[:, :, i, 0] = 0.00001*np.eye(3)  # Initial covariance for the first time step
+    P_cross_pred[:, :, i, 0] = 0.00001*np.eye(3)  # Initial covariance for the first time step
 
 
 # Initialize State Estimates and Covariance Matrices
@@ -177,8 +179,8 @@ P_cross = np.zeros((3, 3, CONFIG["TOTAL_ROBOTS"],  CONFIG["num_steps"]))  # For 
 
 # Fill initial covariance matrices with identity matrices for the first time step
 for i in range(CONFIG["TOTAL_ROBOTS"]):
-    P_self[:, :, i, 0] = 0.01*np.eye(3)  # Initial covariance for the first time step
-    P_cross[:, :, i, 0] = 0.01*np.eye(3)  # Initial covariance for the first time step
+    P_self[:, :, i, 0] = 0.00001*np.eye(3)  # Initial covariance for the first time step
+    P_cross[:, :, i, 0] = 0.00001*np.eye(3)  # Initial covariance for the first time step
 
 
 
@@ -343,26 +345,14 @@ def generate_initial_positions(num_robots, x_range, y_range, initial_leader_posi
 
 def time_update(x_hat, P_self, Q, control_input, f, F_jacobian, P_cross):
     """
-    Performs the Extended Kalman Filter (EKF) time update (prediction step).
-    
-    Parameters:
-        x_hat (ndarray): Current state estimate.
-        P_self (ndarray): Current state covariance for this robot.
-        Q (ndarray): Process noise covariance.
-        control_input (ndarray): Control input applied to the system.
-        f (function): Nonlinear state transition function.
-        F_jacobian (function): Function to compute the Jacobians of f with respect to the state and control input.
-        P_cross (ndarray): Cross-covariance matrix between this robot and others.
-    
-    Returns:
-        x_hat_pred (ndarray): Predicted state estimate.
-        P_self_pred (ndarray): Predicted state covariance for this robot.
-        P_cross_pred (ndarray): Predicted cross-covariance matrix.
+    EKF time update with enhanced numerical stability.
     """
     logging.debug("Performing EKF time update.")
 
-    # Predict state using the nonlinear transition function
-    x_hat_pred = f(x_hat, control_input)
+    # Predict state using nonlinear transition function
+    x_hat_pred = f(x_hat, control_input).flatten()
+
+    print(x_hat_pred, "x_hat_pred")
 
     # Calculate Jacobians of f with respect to state and control input
     F_x, F_u = F_jacobian(x_hat, control_input)
@@ -370,11 +360,16 @@ def time_update(x_hat, P_self, Q, control_input, f, F_jacobian, P_cross):
     # Predict state covariance
     P_self_pred = F_x @ P_self @ F_x.T + F_u @ Q @ F_u.T
 
+    # Ensure numerical stability
+    P_self_pred = (P_self_pred + P_self_pred.T) / 2 
+
     # Predict cross-covariance
     P_cross_pred = F_x @ P_cross @ F_x.T
 
+
     logging.info("Time update completed.")
     return x_hat_pred, P_self_pred, P_cross_pred
+
 
 
 def measurement_update(x_hat_pred, P_self_pred, measurement, R, predicted_nearby_positions, P_pred_nearby, nearby_robots, shadow_robots, shadow_positions, index, 
@@ -388,213 +383,183 @@ def measurement_update(x_hat_pred, P_self_pred, measurement, R, predicted_nearby
     # Predicted measurement using nonlinear measurement function
     z_hat_pred = measurement_function(x_hat_pred, predicted_nearby_positions, index)
 
-
     # Calculate Jacobian of h at the predicted state estimate
     H_r, H_l = H_jacobian(x_hat_pred, predicted_nearby_positions)
+
+    print(H_r, "H_r")
+
 
     # Innovation (residual)
     innovation_regular = measurement - z_hat_pred
 
-    print(R.shape, "R.shape")
-    print(H_r.shape, "H_r.shape")
-    print(P_self_pred.shape, "P_pred.shape")
-    
+    logging.debug(f"Measurement residual (innovation): {innovation_regular}")
+
+    # Calculate P_zz by summing over all neighboring robots
     P_zz = np.zeros((2, 2))
-    # Sum over all neighboring robots
     for i in range(len(H_r)):
         P_zz += H_r[i] @ P_self_pred @ H_r[i].T + H_l[i] @ P_cross_pred @ H_l[i].T
     
-    print(P_zz.shape, "P_zz.shape")
-    print(R.shape, "R.shape")
     # Add the measurement noise covariance
     P_zz += R
 
-    # Regularization for P_zz
-    if P_zz.size == 0:
-        logging.warning("P_zz is empty. Skipping update.")
-        return x_hat_pred, P_self_pred, previous_innovation, adaptive_threshold  # Handle appropriately
-    if np.linalg.cond(P_zz) > 1e10:
-        P_zz += CONFIG["EPSILON"] * np.eye(P_zz.shape[0])
-        
-    # Regularization for P_zz
-    if np.linalg.cond(P_zz) > 1e10:
+    # Check for singularity of P_zz
+    if np.linalg.det(P_zz) < 1e-10:
+        logging.warning("P_zz is singular. Regularizing.")
         P_zz += CONFIG["EPSILON"] * np.eye(P_zz.shape[0])
 
-    
+
+    # Tuning Kalman Gain - try scaling by a small factor to avoid over-correction
     P_regular = np.zeros((3, 2))
-    # Calculate Kalman gain
     for i in range(len(H_r)):
-        P_regular += (P_self_pred @ H_r[i].T + P_cross_pred @ H_l[i].T) 
+        P_regular += (P_self_pred @ H_r[i].T + P_cross_pred @ H_l[i].T)
 
+    # Compute the Kalman gain
     K_regular = P_regular @ np.linalg.inv(P_zz)
-    print(K_regular.shape, "K_regular.shape")
+    logging.debug(f"Kalman gain K_regular: {K_regular.shape}")
+
+    # Update the state estimate
+    update = np.zeros((3,))
+    for i in range(len(H_r)):
+        index = i * 2
+        if index + 2 <= len(innovation_regular):  # Avoid out of bounds
+            update += K_regular @ innovation_regular[index:index + 2]
     
-
-    print(innovation_regular[:2].shape, "innovation_regular.shape")
-    print(x_hat_pred.shape, "x_hat_pred.shape")
-
-    update = np.zeros((3, ))
-
-    # Update state estimate with the regular measurement
-    # Update state estimate with the regular measurement
-    for i in range(1, len(H_r)):  # Iterate from 1 to 49
-        index = (i - 1) * 2  # Calculate the starting index for two elements
-        if index + 2 <= len(innovation_regular):  # Check to avoid out of bounds
-            update += K_regular @ innovation_regular[index:index + 2]  # Take two elements
-    
+    # Updated state estimate
     x_hat_updated = x_hat_pred + update
-    
-    print(x_hat_updated.shape, "x_hat_updated.shape")
+    logging.debug(f"Updated state estimate: {x_hat_updated.shape}")
 
-    # Update covariance
+    print(x_hat_updated, "x_hat_updated")
+
+    # Update covariance estimate
     P_self_updated = P_self_pred - K_regular @ P_zz @ K_regular.T
-    
-    print(shadow_measurement.shape, "shadow_measurement.shape")
-    # Handle shadow measurements
+    P_self_updated = (P_self_updated + P_self_updated.T) / 2 + CONFIG["EPSILON"] * np.eye(P_self_updated.shape[0])
+
+    # If shadow measurements are available, incorporate them
     #if shadow_measurement.size > 0:
-        #shadow_z_hat_pred = measurement_function(x_hat_pred, nearby_positions, index)
-        #Hr_shadow, Hl_shadow = H_jacobian(x_hat_pred, nearby_positions)
-
-        #print(shadow_measurement.shape, "shadow_measurement.shape")
-        #shadow_z_hat_pred = shadow_z_hat_pred[:84]
-
-        #print(shadow_z_hat_pred.shape, "shadow_z_hat_pred.shape")
-
+        # Shadow measurement update (similar to regular measurements)
+        #shadow_z_hat_pred = measurement_function(x_hat_pred, shadow_positions, index)
+        #Hr_shadow, Hl_shadow = H_jacobian(x_hat_pred, shadow_positions)
 
         #shadow_innovation = shadow_measurement - shadow_z_hat_pred
-        #P_zz_shadow = Hr_shadow[0] @ P_pred @ Hr_shadow[0].T + shadow_R
+        #P_zz_shadow = Hr_shadow[0] @ P_pred_nearby @ Hr_shadow[0].T + shadow_R
 
+        # Regularize P_zz_shadow if ill-conditioned
         #if np.linalg.cond(P_zz_shadow) > 1e10:
             #P_zz_shadow += CONFIG["EPSILON"] * np.eye(P_zz_shadow.shape[0])
 
-        #K_shadow = 0.5 * P_pred @ Hr_shadow[0].T @ np.linalg.inv(P_zz_shadow)
-
-        #print(K_shadow.shape, "K_shadow.shape")
-
-        #print(shadow_innovation.shape, "shadow_innovation.shape")
-        #shadow_innovation = shadow_innovation[:, np.newaxis]
-
-        #shadow_innovation = shadow_innovation[:84]
+        #K_shadow = 0.5 * P_pred_nearby @ Hr_shadow[0].T @ np.linalg.inv(P_zz_shadow)
 
         # Incorporate shadow measurement update
         #x_hat_updated += K_shadow @ shadow_innovation
-        #P_updated -= K_shadow @ P_zz_shadow @ K_shadow.T
+        #P_self_updated -= K_shadow @ P_zz_shadow @ K_shadow.T
 
-    # Regularize the updated covariance to ensure symmetry and positive definiteness
-    P_self_updated = (P_self_updated + P_self_updated.T) / 2 + CONFIG["EPSILON"] * np.eye(x_hat_pred.shape[0])
+    # Ensure the updated covariance is positive definite and symmetric
+    P_self_updated = (P_self_updated + P_self_updated.T) / 2 
 
-
-
-    # Check for attack detection and perform event-triggered communication
-    if not attack_detected(innovation_regular):
-        event_trigger, updated_threshold = event_triggered(
+    # Event-triggered communication and attack detection
+    event_trigger, updated_threshold = event_triggered(
             innovation_regular, previous_innovation, adaptive_threshold
         )
 
-        if event_trigger.all():
-            logging.info(f"Event triggered for UGV {index}. Communicating state to neighbors.")
-            return x_hat_updated, P_self_updated, innovation_regular, updated_threshold
-        else:
-            logging.info(f"No event triggered for UGV {index}. Using predicted state.")
-            return x_hat_pred, P_self_pred, previous_innovation, adaptive_threshold
-    else:
-        logging.warning(f"Attack detected for UGV {index}. Ignoring the measurement update.")
-        return x_hat_pred, P_self_pred, previous_innovation, adaptive_threshold
+    logging.info(f"Event triggered for UGV {index}. Communicating state to neighbors.")
+    return x_hat_updated, P_self_updated, innovation_regular, updated_threshold
 
-# Jacobian Functions
 
-def F_jacobian(x_hat, control_input):
+
+
+def F_jacobian(previousPose, control_input):
     """
-    Calculate the Jacobians of the state transition function with respect to state and control inputs.
-    """
-    # Jacobian with respect to state x (F_x)
-    F_x = np.array([[1, 0, -((control_input[1] - control_input[0]) / (2 * CONFIG["b"])) * np.sin(x_hat[2])],
-                    [0, 1,  ((control_input[1] - control_input[0]) / (2 * CONFIG["b"])) * np.cos(x_hat[2])],
-                    [0, 0, 1]])
-
-    # Jacobian with respect to control input u (F_u)
-    F_u = np.array([[0.5 * np.cos(x_hat[2] + (control_input[1] - control_input[0]) / (2 * CONFIG["b"])) , 
-                     0.5 * np.cos(x_hat[2] + (control_input[1] - control_input[0]) / (2 * CONFIG["b"]))],
-                    [0.5 * np.sin(x_hat[2] + (control_input[1] - control_input[0]) / (2 * CONFIG["b"])),
-                     0.5 * np.sin(x_hat[2] + (control_input[1] - control_input[0]) / (2 * CONFIG["b"]))],
-                    [1 / CONFIG["b"], -1 / CONFIG["b"]]])
+    Computes the Jacobians G_mut and G_ut.
+    G_mut: Partial derivative of the current pose w.r.t previous pose (3x3 matrix).
+    G_ut:  Partial derivative of the current pose w.r.t control input (3x2 matrix).
     
-    return F_x, F_u
+    Args:
+        deltaSteps (float): Linear displacement.
+        previousPose (numpy array): Previous pose [x, y, theta] (1x3 matrix).
+        deltaTheta (float): Angular displacement.
+    
+    Returns:
+        list: [G_mut, G_ut], where G_mut is 3x3 and G_ut is 3x2.
+    """
+    previousTheta = previousPose[2]  # Extract previous orientation (theta)
+    b = CONFIG["b"]  # Wheelbase or distance between wheels
+    deltaTheta = (control_input[1] - control_input[0]) / (2 * CONFIG["b"])
+    
+    deltaSteps = (control_input[1] + control_input[0]) / 2
+
+
+    # Initialize G_mut (Jacobian w.r.t. previous pose)
+    F_x = np.array([[1, 0, -deltaSteps * np.sin(previousTheta + deltaTheta)],
+                      [0, 1,  deltaSteps * np.cos(previousTheta + deltaTheta)],
+                      [0, 0, 1]])
+
+    # Initialize G_ut (Jacobian w.r.t. control input)
+    DS = deltaSteps
+    DT = deltaTheta + previousTheta  # Total angle change
+
+    G_ut = np.array([[ DS * np.sin(DT) + b * np.cos(DT), -DS * np.sin(DT) + b * np.cos(DT)],
+                     [-DS * np.cos(DT) + b * np.sin(DT),  DS * np.cos(DT) + b * np.sin(DT)],
+                     [-2, 2]])
+
+    # Normalize G_ut by (2 * b)
+    F_u = (1 / (2 * b)) * G_ut
+
+    # Return the Jacobians
+    return [F_x, F_u]
+
 
 
 
 
 def H_jacobian(current_pose, nearby_pose):
     """
-    Computes the Jacobians H_r and H_l for the measurement model.
-    current_pose should be a 1D array of shape (3,) [rx, ry, theta].
-    nearby_pose should be a 2D array of shape (n, 2) where n is the number of nearby landmarks.
+    Computes the Jacobians H_r and H_l for the measurement model with numerical stability checks.
     """
-    # Ensure current_pose is a 1D array of shape (3,)
-    if current_pose.ndim != 1 or current_pose.shape[0] != 3:
-        raise ValueError("current_pose must be a 1D array of shape (3,).")
-    
-    # Unpack current pose
     rx, ry = current_pose[0], current_pose[1]
-    
     H_r_list = []
     H_l_list = []
-    
+
     for nearby in nearby_pose:
         lx, ly = nearby[0], nearby[1]
-        
-        q = np.sqrt((lx - rx) ** 2 + (ly - ry) ** 2)
-        
-        
+        q = np.sqrt((lx - rx) ** 2 + (ly - ry) ** 2 + CONFIG["EPSILON"])
+
         # Calculate Jacobians
         H_r = (1 / q) * np.array([
             [-(lx - rx), -(ly - ry), 0],
             [(ly - ry) / q, -(lx - rx) / q, -q]
         ])
-        
         H_l = (1 / q) * np.array([
             [lx - rx, ly - ry, 0],
             [-(ly - ry) / q, (lx - rx) / q, 0]
         ])
-        
+
         H_r_list.append(H_r)
         H_l_list.append(H_l)
-    
+
+
     return np.array(H_r_list), np.array(H_l_list)
 
 
 
 
+
 def state_transition(previousPose, ut):
-    # Estimates the next position and orientation of a 2 wheeled robot
-    # INPUT: 
-    # previousPose: 1x3 array [previousX, previousY, previousTheta]
-    # ut: 1x2 array [DL, DR]
-    
-    previousX = previousPose[0]
-    previousY = previousPose[1]
-    previousTheta = previousPose[2]
+    """
+    Predicts the next state of a 2-wheeled robot.
+    """
+    previousX, previousY, previousTheta = previousPose
+    DL, DR = ut
 
-    DL = ut[0]
-    DR = ut[1]
-
-
-    # Calculate the new x coordinate
+    # New state estimates
     currentX = previousX + ((DR + DL) / 2) * np.cos(previousTheta + ((DR - DL) / (2 * CONFIG["b"])))
-
-    # Calculate the new y coordinate
     currentY = previousY + ((DR + DL) / 2) * np.sin(previousTheta + ((DR - DL) / (2 * CONFIG["b"])))
-
-    # Calculate the new Theta
     currentTheta = previousTheta + (DR - DL) / CONFIG["b"]
 
-    # Normalize results between [-pi, pi]
+    # Normalize orientation
     currentTheta = normalizeAngle(currentTheta)
 
-    print(np.array([currentX, currentY, currentTheta]).shape, "np.array([currentX, currentY, currentTheta]).shape")
+    return np.array([currentX, currentY, currentTheta])
 
-    # Create the output as a numpy array
-    return np.array([currentX, currentY, currentTheta]).flatten()
 
 def normalizeAngle(originalAngle):
     """
@@ -610,7 +575,7 @@ def normalizeAngle(originalAngle):
     normalizedAngle = originalAngle % (2 * np.pi)
 
     # Shift to [-pi, pi] if necessary
-    if normalizedAngle > np.pi:
+    if normalizedAngle.all() > np.pi:
         normalizedAngle -= 2 * np.pi
 
     return normalizedAngle
@@ -827,6 +792,7 @@ def bearing_measurement(robot_position, neighbor_positions):
     bearings = angles_to_nearby - robot_position[2]
 
     bearings = np.arctan2(np.sin(bearings), np.cos(bearings))
+    bearings=normalizeAngle(bearings)
     return bearings
 
 
@@ -1485,6 +1451,8 @@ def run_simulation(robotarium_env, CONFIG, x_hat, P_self, P_cross, positions,
             if step >= 170:
                 control_input_noisy = [0,0]  # Set the last 5 samples to zero for all robots
                 x_hat[:, i, step-1] = x_hat[:, i, 170]
+            
+            
 
             # Check for DoS attack on specific robots
             if i in dos_attacked_robots:
@@ -1576,6 +1544,7 @@ def run_simulation(robotarium_env, CONFIG, x_hat, P_self, P_cross, positions,
         dxu = si_to_uni_dyn(dxi, ground_truth)
         if step >= 170:
              dxu[:, :] = 0  # Set the last 5 samples to zero for all robots
+
        
         r.set_velocities(np.arange(CONFIG["TOTAL_ROBOTS"]), dxu)  # Update velocities for all robots
             # Step the simulation forward
@@ -1809,6 +1778,55 @@ def plot_final_states(ground_truth, estimates, control_command, num_robots, samp
     for j in range(num_robots, nrows * ncols):
         fig.delaxes(axes_control[j])  # Remove any empty subplots
 
+    # Handle any unused subplots if the number of robots is not a multiple of 2
+    for j in range(num_robots, nrows * ncols):
+        fig.delaxes(axes_control[j])  # Remove any empty subplots
+    
+        # Save ground truth and estimates to CSV
+    for i in range(num_robots):
+        start_index = i * samples_per_robot
+        end_index = start_index + samples_per_robot
+        
+        data = {
+            "Time": np.arange(samples_per_robot),
+            "GroundTruth_X": ground_truth[start_index:end_index, 0],
+            "GroundTruth_Y": ground_truth[start_index:end_index, 1],
+            "Estimate_X": estimates[start_index:end_index, 0],
+            "Estimate_Y": estimates[start_index:end_index, 1],
+        }
+        df = pd.DataFrame(data)
+        df.to_csv(f"robot_{i}_ground_truth_estimates.csv", index=False)
+
+    for i in range(num_robots):
+        start_index = i * samples_per_robot
+        end_index = start_index + samples_per_robot
+        
+        data = {
+            "Time": np.arange(samples_per_robot),
+            "LinearVelocity": control_command[start_index:end_index, 0],
+            "AngularVelocity": control_command[start_index:end_index, 1],
+        }
+        df = pd.DataFrame(data)
+        df.to_csv(f"robot_{i}_control_commands.csv", index=False)
+
+        # Save MSE for each robot
+    for i in range(num_robots):
+        data = {
+            "Time": np.arange(samples_per_robot),
+            "MSE": mse[i, :],
+        }
+        df = pd.DataFrame(data)
+        df.to_csv(f"robot_{i}_mse.csv", index=False)
+
+    # Save average MSE across robots
+    data = {
+        "Time": np.arange(samples_per_robot),
+        "AverageMSE": avg_mse,
+    }
+    df_avg_mse = pd.DataFrame(data)
+    df_avg_mse.to_csv("average_mse.csv", index=False)
+
+
     plt.tight_layout(pad=6.0)
     plt.subplots_adjust(top=0.90, hspace=0.8, wspace=0.6)
     plt.suptitle("Event-based EKF for Multi-Robot Localization in Sparse Sensing Graph and Adversarial Environment \n Control Commands for Robots", fontsize=16)
@@ -1923,6 +1941,7 @@ if __name__ == "__main__":
     )
 
     
+
 
 
 
