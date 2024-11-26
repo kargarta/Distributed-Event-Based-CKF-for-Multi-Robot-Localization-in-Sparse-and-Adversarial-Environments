@@ -12,6 +12,7 @@ import logging
 from scipy.interpolate import CubicSpline
 from math import pi  # or import numpy as np and use np.pi
 from scipy.linalg import cholesky, eigvalsh
+import pandas as pd
 
 # Configure Logging
 logging.basicConfig(level=logging.DEBUG,  # Set the log level
@@ -50,7 +51,7 @@ CONFIG = {
     "TARGET_AREA": (2, 2),
     
     # Number of steps in the simulation or control loop.
-    "num_steps": 180,
+    "num_steps": 170,
 
     # Time interval for each iteration of the control loop.
     "dt": 0.1,
@@ -64,7 +65,7 @@ CONFIG = {
     "previous_error_follower": np.zeros(2),
 
     # Limit for control input to prevent excessive values.
-    "CONTROL_INPUT_LIMIT": 2,
+    "CONTROL_INPUT_LIMIT": 0.8,
 
     # Minimum safe distance between robots to avoid collisions.
     "SAFE_DISTANCE": 0.01,  # Minimum distance robots should maintain to avoid collisions.
@@ -301,36 +302,40 @@ def generate_cubature_points(P_upd, x_est):
     # Enforce symmetry
     P_upd = (P_upd + P_upd.T) / 2
     
-    # Log eigenvalues to understand stability
-    eigenvalues = np.linalg.eigvalsh(P_upd)
-    logging.debug(f"Eigenvalues of P before adjustment: {eigenvalues}")
+    # Ensure positive definiteness with stricter threshold
+    min_threshold = 1e-9
+    eigenvalues, V = np.linalg.eigh(P_upd)
     
-    # Adjust P if needed to make it positive definite
-    min_eig_threshold = 1e-8
-    min_eigval = np.min(eigenvalues)
-    if min_eigval < min_eig_threshold:
-        P_upd += (abs(min_eigval) + CONFIG["EPSILON"]) * np.eye(n)
+    # Log for debugging purposes
+    logging.debug(f"Eigenvalues before adjustment: {eigenvalues}")
     
-    # Try Cholesky, fallback to SVD if it fails
+    # Adjust small eigenvalues
+    eigenvalues = np.maximum(eigenvalues, min_threshold)
+    P_upd = V @ np.diag(eigenvalues) @ V.T
+    
     try:
-        S = cholesky(P_upd, lower=True)
-    except np.linalg.LinAlgError:
-        logging.warning("Cholesky decomposition failed. Falling back to SVD for positive definiteness.")
-        U, s, Vt = np.linalg.svd(P_upd)
-        s[s < min_eig_threshold] = min_eig_threshold  # Ensure minimum eigenvalue threshold
-        P_upd = U @ np.diag(s) @ Vt
-        S = cholesky(P_upd, lower=True)
-
+        # Attempt Cholesky decomposition
+        S = np.linalg.cholesky(P_upd).T
+    except np.linalg.LinAlgError as e:
+        logging.error("Matrix remains non-SPD after adjustments.")
+        raise ValueError("Matrix not positive definite after adjustments.")
+    
     # Generate cubature points
-    cubature_points = np.zeros((2 * n, n))
     scaling_factor = np.sqrt(n)
+    cubature_points = np.zeros((2 * n, n))
     
     for i in range(n):
         cubature_points[i] = scaling_factor * S[:, i] + x_est
         cubature_points[i + n] = -scaling_factor * S[:, i] + x_est
-
+    
     logging.info("Cubature points generated successfully.")
     return cubature_points
+
+
+
+
+
+
 
 
 
@@ -348,173 +353,133 @@ def time_update(x_hat, P, Q, control_input, f):
     P_pred = np.cov(propagated_points, rowvar=False) + Q
     logging.info("Time update completed.")
     return x_hat_pred, P_pred
-
-def measurement_update(x_hat_pred, P_pred, measurement, R, predicted_nearby_positions, P_pred_nearby, nearby_robots, shadow_robots, shadow_positions, index, 
-                       previous_innovation, adaptive_threshold, shadow_measurement, shadow_R):
+            
+   
+def measurement_update(x_hat_pred, P_pred, measurement, R, predicted_nearby_positions, P_pred_nearby,
+                       nearby_robots, shadow_robots, shadow_positions, index, previous_innovation,
+                       adaptive_threshold, shadow_measurement, shadow_R):
     """
-    Performs the CKF measurement update (correction) with event-triggered communication and attack detection,
-    considering both regular and shadow edge measurements.
+    Perform the CKF measurement update step with support for event-triggered communication,
+    shadow measurements, and attack detection.
     """
 
-    # Generate cubature points
     n = x_hat_pred.shape[0]  # Number of states
 
-
-    
+    # Generate sigma points and weights
     cubature_points = generate_cubature_points(P_pred, x_hat_pred)
-    
 
-    # Generate cubature points for neighboring robots' predicted positions
-    cubature_points_neighbors = []
-
-    for i in range(0, nearby_robots):  # Iterate over predicted positions of neighboring robots
-
-        cubature_points_neighbor = generate_cubature_points(P_pred_nearby[i, :, :], predicted_nearby_positions[i, :])
-        
-        cubature_points_neighbors.append(cubature_points_neighbor)
-    cubature_points_neighbors = np.array(cubature_points_neighbors)
-        # Propagate cubature points through the measurement function h for regular measurements
-    
+    # Generate sigma points for neighboring robots
+    sigma_points_neighbors = []
+    for i in range(nearby_robots):
+        cubature_points_neighbors = generate_cubature_points(P_pred_nearby[i], predicted_nearby_positions[i])
+        sigma_points_neighbors.append(cubature_points_neighbors)
+    cubature_points_neighbors = np.array(sigma_points_neighbors)
     cubature_points_neighbors_transposed = np.transpose(cubature_points_neighbors, axes=(1, 0, 2))
-    
-    measurement_points = []
 
-    for i in range(6):
-    
-        measurement_point = np.array([measurement_function(cubature_points[i], cubature_points_neighbors_transposed[i], index) ])
+    # Propagate sigma points through the measurement function
+    # Propagate cubature points through the measurement function for regular measurements
+    measurement_points = np.array([
+        np.array([measurement_function(cubature_points[i], cubature_points_neighbors_transposed[i], index)])
+        for i in range(2 * n)
+    ]).squeeze(axis=1)
 
-        measurement_points.append(measurement_point)
-
-    measurement_points = np.array(measurement_points)
-    measurement_points = measurement_points.squeeze(axis=1)
-
-
-    # Calculate predicted measurement mean and covariance for regular measurements
+    # Calculate predicted measurement mean and covariance
     z_hat_pred = np.mean(measurement_points, axis=0)
+    P_zz = np.cov(measurement_points, rowvar=False) + R
 
-    covariance_matrix = np.cov(measurement_points, rowvar=False)
+    # Calculate cross-covariance matrix P_xz
+    P_xz = np.mean([
+        np.outer(cubature_points[i] - x_hat_pred, measurement_points[i] - z_hat_pred)
+        for i in range(2 * n)
+    ], axis=0)
 
-    # Adjust the dimensions of R for regular measurements
-    P_zz = covariance_matrix + R
+        # Check if P_zz is singular and add a small regularization term if necessary
+    regularization_factor = 1e-6
+    if np.linalg.cond(P_zz) > 1e10:
+        print("Warning: P_zz is near singular, adding regularization.")
+        P_zz += np.eye(P_zz.shape[0]) * regularization_factor
 
-    # Calculate cross-covariance matrix P_xz for regular measurements
-    P_xz = np.zeros((n, 2*nearby_robots ))  # Initialize with the shape (state_dim, measurement_dim)
-
-    for i in range(2 * n):
-        outer_product = np.outer(cubature_points[i] - x_hat_pred, measurement_points[i, : ] - z_hat_pred)
-        P_xz += outer_product
-    P_xz /= (2 * n)
-
-
-    # Regularization for P_zz
-    if P_zz.size == 0:
-        P_zz = R
-    elif np.linalg.cond(P_zz) > 1e10:
-        P_zz += CONFIG["EPSILON"] * np.eye(P_zz.shape[0])
+    # Now compute the Kalman gain
+    K_regular = P_xz @ np.linalg.inv(P_zz)
 
 
-    
     # Calculate Kalman gain for regular measurements
     K_regular = P_xz @ np.linalg.inv(P_zz)
 
     # Compute the innovation (residual) for regular measurements
     innovation_regular = measurement - z_hat_pred
-    
 
-    # Handle shadow measurements
-    # Propagate cubature points through the shadow measurement function
-    # Propagate cubature points through the shadow measurement function
-    # Make sure that `point` is reshaped correctly and `nearby_positions` has compatible dimensions
-
-
-    # Define your measurement function for shadow measurements
-    # Assuming point is of shape (3,) and nearby_positions is of shape (9, 2)
-# This assumes point represents a 3D position and you want to stack it appropriately
-
+    # Shadow measurement handling
     shadow_measurement_points = np.array([
-    shadow_range_measurement(
-        positions={'v_i': point, 'h': nearby_positions},  # Use as is
-        distances=calculate_distances_and_errors(
-            np.column_stack((np.tile(point.reshape(1, -1), (shadow_positions.shape[0], 1)), shadow_positions))  # Repeat point for stacking
-        )[0],
-        errors=calculate_distances_and_errors(
-            np.column_stack((np.tile(point.reshape(1, -1), (shadow_positions.shape[0], 1)), shadow_positions))  # Repeat point for stacking
-        )[1],
-        rho=compute_rho(
-            np.column_stack((np.tile(point.reshape(1, -1), (shadow_positions.shape[0], 1)), shadow_positions)),
-            threshold=1
+        shadow_range_measurement(
+            positions={'v_i': point, 'h': shadow_positions},
+            distances=calculate_distances_and_errors(
+                np.column_stack((np.tile(point.reshape(1, -1), (shadow_positions.shape[0], 1)), shadow_positions))
+            )[0],
+            errors=calculate_distances_and_errors(
+                np.column_stack((np.tile(point.reshape(1, -1), (shadow_positions.shape[0], 1)), shadow_positions))
+            )[1],
+            rho=compute_rho(
+                np.column_stack((np.tile(point.reshape(1, -1), (shadow_positions.shape[0], 1)), shadow_positions)),
+                threshold=1
+            )
         )
-    )
-    for point in cubature_points
-])
+        for point in cubature_points
+    ])
 
-
-    # Calculate predicted measurement mean and covariance for shadow measurements
-    if  shadow_measurement_points.size > 0:  # Check if shadow_measurement_points is not empty
-        shadow_z_hat_pred = np.mean(shadow_measurement_points, axis=0)
-        shadow_covariance_matrix = np.cov(shadow_measurement_points, rowvar=False)
-
-        # Adjust the dimensions of shadow_R
-        P_zz_shadow = shadow_covariance_matrix+ shadow_R
+    if shadow_measurement_points.size > 0:
+        shadow_z_hat_pred = np.average(shadow_measurement_points, axis=0)
+        P_zz_shadow = sum(
+                np.outer(
+                shadow_measurement_points[i] - shadow_z_hat_pred,
+                shadow_measurement_points[i] - shadow_z_hat_pred
+            )
+            for i in range(2 * n + 1)
+        ) + shadow_R
     else:
-        # Handle case where there are no shadow measurement points
-        shadow_z_hat_pred = np.zeros(2*shadow_robots)  # Default prediction
-        P_zz_shadow = np.eye(2*shadow_robots) * CONFIG["EPSILON"]  # Small covariance to avoid singularity
-        shadow_covariance_matrix = np.zeros((2*shadow_robots, 2*shadow_robots))  # Default covariance
+        shadow_z_hat_pred = np.zeros(2 * shadow_robots)
+        P_zz_shadow = np.eye(2 * shadow_robots) * 1e-6
 
     # Calculate cross-covariance matrix P_xz for shadow measurements
-    P_xz_shadow = np.zeros((n, 2*shadow_robots))  # Initialize with the shape (state_dim, measurement_dim)
-    if  shadow_measurement_points.size > 0:  # Only compute if we have measurements
-        for i in range(2 * n):
-            outer_product = np.outer(cubature_points[i] - x_hat_pred, shadow_measurement_points[i, :] - shadow_z_hat_pred)
-            P_xz_shadow += outer_product
-        P_xz_shadow /= (2 * n)
-
-    # Regularization for P_zz_shadow
-    if P_zz_shadow.size == 0:
-        P_zz_shadow = shadow_R
-    elif np.linalg.cond(P_zz_shadow) > 1e10:
-        P_zz_shadow += CONFIG["EPSILON"] * np.eye(P_zz_shadow.shape[0])
-
-
-    # Calculate Kalman gain for shadow measurements (half of the regular)
-    K_shadow = 0.5 * P_xz_shadow @ np.linalg.inv(P_zz_shadow)
-
-    # Attack-detection mechanism
-    attack_detection = attack_detected(innovation_regular)
-
-    # Event-triggered communication
-    event_trigger, updated_threshold = event_triggered(
-                    innovation_regular, previous_innovation, adaptive_threshold
-            )
- 
-    attack_detection_repeated = 1 - np.repeat(attack_detection, 2)
-    event_trigger_repeated = np.repeat(event_trigger, 2)
-
-    # Adjusted broadcast operation for x_hat_updated
-    innovation_adjusted = K_regular @ ( innovation_regular)
     if shadow_measurement_points.size > 0:
-        # Update state estimate
-        x_hat_updated = x_hat_pred + innovation_adjusted 
+        shadow_z_hat_pred = np.average(shadow_measurement_points, axis=0)
+        P_zz_shadow = sum(
+                np.outer(
+                shadow_measurement_points[i] - shadow_z_hat_pred,
+                shadow_measurement_points[i] - shadow_z_hat_pred
+            )
+            for i in range(2 * n + 1)
+        ) + shadow_R
 
-        # Update covariance
-        P_updated = P_pred - K_regular @ P_zz @ K_regular.T 
+        # Ensure P_zz_shadow is positive definite and invertible
+        if np.linalg.cond(P_zz_shadow) > 1e10:
+            P_zz_shadow += np.eye(P_zz_shadow.shape[0]) * 1e-6
 
+        P_xz_shadow = sum(
+                np.outer(
+                cubature_points[i] - x_hat_pred,
+                shadow_measurement_points[i] - shadow_z_hat_pred
+            )
+            for i in range(2 * n + 1)
+        )
+
+        K_shadow = 0.5 * P_xz_shadow @ np.linalg.inv(P_zz_shadow)
     else:
-        # If no shadow measurements are available, only use regular updates
-        x_hat_updated = x_hat_pred + innovation_adjusted
+        shadow_z_hat_pred = None
+        P_zz_shadow = None
+        K_shadow = np.zeros((n, shadow_measurement.shape[0]))  # Initialize gain as zero
+        innovation_shadow = np.zeros_like(shadow_measurement)
 
-        # Update covariance
-        P_updated = P_pred - K_regular @ P_zz @ K_regular.T 
+    # State and covariance update
+    x_hat_updated = x_hat_pred + K_regular @ innovation_regular
+    if shadow_measurement_points.size > 0:
+        x_hat_updated += K_shadow @ (shadow_measurement - shadow_z_hat_pred)
 
-        # No event triggered, return the predicted values
-        # Ensure covariance matrix remains symmetric and positive definite
+    P_updated = P_pred - K_regular @ P_zz @ K_regular.T
+    #if shadow_measurement_points.size > 0:
+        #P_updated -= K_shadow @ P_zz_shadow @ K_shadow.T
 
-
-    return x_hat_updated, P_updated, previous_innovation, adaptive_threshold, event_trigger, attack_detection
-            
-   
-
+    return x_hat_updated, P_updated, innovation_regular, adaptive_threshold, event_triggered, attack_detected
 
 
 
@@ -1086,12 +1051,10 @@ def initialize_headings(num_robots, initial_leader_heading=0):
     headings = np.zeros(num_robots)
 
     # Set the leader's initial heading
-    headings[0] = initial_leader_heading  # For example, facing upwards (90 degrees)
+    headings[0] = initial_leader_heading
 
-    # Set initial headings for followers
-    for i in range(1, num_robots):
-        # Initialize followers' headings (e.g., random, or facing the leader)
-        headings[i] = initial_leader_heading + np.random.uniform(-np.pi / 8, np.pi / 8)
+    # Set initial headings for followers with fixed offsets
+    headings[i] = initial_leader_heading + np.random.uniform(-np.pi / 8, np.pi / 8)
 
     return headings
 
@@ -1817,6 +1780,51 @@ def plot_final_states(ground_truth, estimates, control_command, num_robots, samp
     # Handle any unused subplots if the number of robots is not a multiple of 2
     for j in range(num_robots, nrows * ncols):
         fig.delaxes(axes_control[j])  # Remove any empty subplots
+    
+        # Save ground truth and estimates to CSV
+    for i in range(num_robots):
+        start_index = i * samples_per_robot
+        end_index = start_index + samples_per_robot
+        
+        data = {
+            "Time": np.arange(samples_per_robot),
+            "GroundTruth_X": ground_truth[start_index:end_index, 0],
+            "GroundTruth_Y": ground_truth[start_index:end_index, 1],
+            "Estimate_X": estimates[start_index:end_index, 0],
+            "Estimate_Y": estimates[start_index:end_index, 1],
+        }
+        df = pd.DataFrame(data)
+        df.to_csv(f"robot_{i}_ground_truth_estimates.csv", index=False)
+
+    for i in range(num_robots):
+        start_index = i * samples_per_robot
+        end_index = start_index + samples_per_robot
+        
+        data = {
+            "Time": np.arange(samples_per_robot),
+            "LinearVelocity": control_command[start_index:end_index, 0],
+            "AngularVelocity": control_command[start_index:end_index, 1],
+        }
+        df = pd.DataFrame(data)
+        df.to_csv(f"robot_{i}_control_commands.csv", index=False)
+
+        # Save MSE for each robot
+    for i in range(num_robots):
+        data = {
+            "Time": np.arange(samples_per_robot),
+            "MSE": mse[i, :],
+        }
+        df = pd.DataFrame(data)
+        df.to_csv(f"robot_{i}_mse.csv", index=False)
+
+    # Save average MSE across robots
+    data = {
+        "Time": np.arange(samples_per_robot),
+        "AverageMSE": avg_mse,
+    }
+    df_avg_mse = pd.DataFrame(data)
+    df_avg_mse.to_csv("average_mse.csv", index=False)
+
 
     plt.tight_layout(pad=6.0)
     plt.subplots_adjust(top=0.90, hspace=0.8, wspace=0.6)
@@ -1931,3 +1939,4 @@ if __name__ == "__main__":
     )
 
     
+
