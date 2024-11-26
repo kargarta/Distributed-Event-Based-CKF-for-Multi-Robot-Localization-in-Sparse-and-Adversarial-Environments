@@ -12,6 +12,8 @@ import logging
 from scipy.interpolate import CubicSpline
 from math import pi  # or import numpy as np and use np.pi
 from scipy.linalg import cholesky, eigvalsh
+import pandas as pd
+
 
 # Configure Logging
 logging.basicConfig(level=logging.DEBUG,  # Set the log level
@@ -493,7 +495,8 @@ def measurement_update(x_hat_pred, P_pred, measurement, R, predicted_nearby_posi
     event_trigger_repeated = np.repeat(event_trigger, 2)
 
     # Adjusted broadcast operation for x_hat_updated
-    innovation_adjusted = K_regular @ ( innovation_regular)
+    innovation_adjusted = K_regular @ (attack_detection_repeated * innovation_regular)
+
     if shadow_measurement_points.size > 0:
         # Update state estimate
         x_hat_updated = x_hat_pred + innovation_adjusted 
@@ -945,7 +948,7 @@ def event_triggered(innovation, prev_innovation, threshold=None, decay_factor=0.
 # Initialize a dictionary to store consecutive large innovation counts for each pair
 consecutive_large_innovations = {}
 
-def attack_detected(innovation, threshold=0.00):
+def attack_detected(innovation, threshold=0.1):
     """
     Detects attacks in segments of the innovation array. Each segment (pair of elements)
     is checked to see if it consistently exceeds the threshold over a certain number of steps.
@@ -1819,6 +1822,55 @@ def plot_final_states(ground_truth, estimates, control_command, num_robots, samp
     for j in range(num_robots, nrows * ncols):
         fig.delaxes(axes_control[j])  # Remove any empty subplots
 
+    # Handle any unused subplots if the number of robots is not a multiple of 2
+    for j in range(num_robots, nrows * ncols):
+        fig.delaxes(axes_control[j])  # Remove any empty subplots
+    
+        # Save ground truth and estimates to CSV
+    for i in range(num_robots):
+        start_index = i * samples_per_robot
+        end_index = start_index + samples_per_robot
+        
+        data = {
+            "Time": np.arange(samples_per_robot),
+            "GroundTruth_X": ground_truth[start_index:end_index, 0],
+            "GroundTruth_Y": ground_truth[start_index:end_index, 1],
+            "Estimate_X": estimates[start_index:end_index, 0],
+            "Estimate_Y": estimates[start_index:end_index, 1],
+        }
+        df = pd.DataFrame(data)
+        df.to_csv(f"robot_{i}_ground_truth_estimates.csv", index=False)
+
+    for i in range(num_robots):
+        start_index = i * samples_per_robot
+        end_index = start_index + samples_per_robot
+        
+        data = {
+            "Time": np.arange(samples_per_robot),
+            "LinearVelocity": control_command[start_index:end_index, 0],
+            "AngularVelocity": control_command[start_index:end_index, 1],
+        }
+        df = pd.DataFrame(data)
+        df.to_csv(f"robot_{i}_control_commands.csv", index=False)
+
+        # Save MSE for each robot
+    for i in range(num_robots):
+        data = {
+            "Time": np.arange(samples_per_robot),
+            "MSE": mse[i, :],
+        }
+        df = pd.DataFrame(data)
+        df.to_csv(f"robot_{i}_mse.csv", index=False)
+
+    # Save average MSE across robots
+    data = {
+        "Time": np.arange(samples_per_robot),
+        "AverageMSE": avg_mse,
+    }
+    df_avg_mse = pd.DataFrame(data)
+    df_avg_mse.to_csv("average_mse.csv", index=False)
+
+
     plt.tight_layout(pad=6.0)
     plt.subplots_adjust(top=0.90, hspace=0.8, wspace=0.6)
     plt.suptitle("Event-based UKF for Multi-Robot Localization in Sparse Sensing Graph and Adversarial Environment \n Control Commands for Robots", fontsize=16)
@@ -1925,10 +1977,11 @@ if __name__ == "__main__":
         leader_control_policy=leader_control_policy,
         follower_control_policy=follower_control_policy,
         plot_final_states=plot_final_states,
-        do_s_attack_probability=0.0,  # Example probability for DoS attack
-        fdi_attack_probability=0.0,   # Example probability for FDI attack
-        max_dos_robots=2,             # Example maximum number of robots affected by DoS attack
-        max_fdi_measurements=2      # Example maximum number of measurements affected by FDI attack
+        do_s_attack_probability=0.1,  # Example probability for DoS attack
+        fdi_attack_probability=0.1,   # Example probability for FDI attack
+        max_dos_robots=5,             # Example maximum number of robots affected by DoS attack
+        max_fdi_measurements=5      # Example maximum number of measurements affected by FDI attack
     )
 
     
+
