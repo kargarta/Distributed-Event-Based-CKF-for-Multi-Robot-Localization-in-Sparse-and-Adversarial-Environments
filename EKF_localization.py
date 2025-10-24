@@ -16,19 +16,19 @@ import pandas as pd
 
 
 # Configure Logging
-logging.basicConfig(level=logging.DEBUG,  # Set the log level
-                    format='%(asctime)s - %(levelname)s - %(message)s')  # Set the log format
+#logging.basicConfig(level=logging.DEBUG,  # Set the log level
+                    #format='%(asctime)s - %(levelname)s - %(message)s')  # Set the log format
 
 # Configuration Constants
 CONFIG = {
     # Total number of robots in the system.
-    "TOTAL_ROBOTS": 10,
+    "TOTAL_ROBOTS": 17,
     
     # Standard deviation of noise added to control inputs.
-    "CONTROL_NOISE_STD": 0.001,
+    "CONTROL_NOISE_STD": 0.1,
     
     # Covariance matrix representing the process noise in the system.
-    "PROCESS_NOISE_COVARIANCE": np.eye(2) * 0.0001,  # 2x2 identity matrix scaled by 0.01.
+    "PROCESS_NOISE_COVARIANCE": np.eye(2) * 0.001,  # 2x2 identity matrix scaled by 0.01.
     
     # Threshold for triggering events in the control strategy.
     "EVENT_TRIGGER_THRESHOLD": 0.001,
@@ -37,10 +37,10 @@ CONFIG = {
     "EPSILON": 1e-6,
     
     # Standard deviation of noise in range measurements.
-    "RANGE_NOISE_STD": 100,
+    "RANGE_NOISE_STD": 150,
     
     # Standard deviation of noise in bearing measurements.
-    "BEARING_NOISE_STD": 100,
+    "BEARING_NOISE_STD": 150,
     
     # Operational area limits for the x-coordinate.
     "x_limits": (-2, 2),
@@ -52,10 +52,10 @@ CONFIG = {
     "TARGET_AREA": (2, 2),
     
     # Number of steps in the simulation or control loop.
-    "num_steps": 170,
+    "num_steps": 250,
 
     # Time interval for each iteration of the control loop.
-    "dt": 0.01,
+    "dt": 0.1,
     
     # Initialize the integral term for the PID controller (2D control).
     "integral_leader": np.zeros(2),
@@ -66,10 +66,10 @@ CONFIG = {
     "previous_error_follower": np.zeros(2),
 
     # Limit for control input to prevent excessive values.
-    "CONTROL_INPUT_LIMIT": 0.8,
+    "CONTROL_INPUT_LIMIT": 0.7,
 
     # Minimum safe distance between robots to avoid collisions.
-    "SAFE_DISTANCE": 0.01,  # Minimum distance robots should maintain to avoid collisions.
+    "SAFE_DISTANCE": 0.100,  # Minimum distance robots should maintain to avoid collisions.
 
     # Gain for the control barrier function (CBF) to ensure collision avoidance.
     "cbf_gain": 0.1,
@@ -88,10 +88,10 @@ CONFIG = {
     "FOLLOWER_INDEX": 1,  # Default for follower; update dynamically during the simulation if needed.
 
     # Distance threshold for reaching a waypoint.
-    "close_enough": 0.01,
+    "close_enough": 0.1,
 
     # Regular Sensing range of robots
-    "regular_sensing_range": 6,
+    "regular_sensing_range": 1,
     
     # Shadow Sensing range of robots
     "shadow_sensing_range": 7, 
@@ -103,7 +103,7 @@ CONFIG = {
     "delta_steps": 0.01,
 
     # Assume the initial position of the leader is known
-    "initial_leader_position": np.array([0.1, 0.1])  # Replace with actual initial position if different
+    "initial_leader_position": np.array([-0.00, 0.00])  # Replace with actual initial position if different
 }
 
 
@@ -133,12 +133,54 @@ MEASUREMENT_NOISE_COVARIANCE = np.diag(
     [CONFIG["BEARING_NOISE_STD"]**2] 
 )
 
+def generate_initial_positions(num_robots, x_range, y_range, initial_leader_position):
+    """
+    Generate initial positions for the robots in a grid pattern around the leader's initial position.
+
+    Parameters:
+        num_robots (int): Total number of robots (including the leader).
+        x_range (tuple): Operational range for the x-coordinate (min, max).
+        y_range (tuple): Operational range for the y-coordinate (min, max).
+        initial_leader_position (np.ndarray): Initial position of the leader robot (x, y).
+        grid_size (int): The number of rows and columns for the grid layout for followers.
+
+    Returns:
+        np.ndarray: An array of shape (3, num_robots) containing the initial positions and orientations.
+    """
+
+    grid_size = 4
+    
+    # Create an array to hold the initial positions of all robots
+    initial_positions = np.zeros((3, num_robots))  # 3 rows for [x, y, theta]
+
+    # Set the initial position and orientation of the leader robot (index 0)
+    initial_positions[0, 0] = initial_leader_position[0] -0.5  # Leader's x position
+    initial_positions[1, 0] = initial_leader_position[1]  # Leader's y position
+    initial_positions[2, 0] = 0  # Leader's orientation set to 90 degrees (pi/2)
+
+    # Calculate spacing for grid placement
+    spacing_x = 0.3*(x_range[1] - x_range[0]) / (grid_size + 1)  # Space between each robot in x-direction
+    spacing_y = 0.3*(y_range[1] - y_range[0]) / (grid_size + 1)  # Space between each robot in y-direction
+
+    # Position the followers in a grid-like pattern
+    follower_index = 1
+    for row in range(grid_size):
+        for col in range(grid_size):
+            if follower_index < num_robots:
+                # Calculate the follower's position based on grid layout
+                initial_positions[0, follower_index] = initial_leader_position[0] + (col - grid_size // 2) * spacing_x - 1
+                initial_positions[1, follower_index] = initial_leader_position[1] + (row - grid_size // 2) * spacing_y + 0.1
+                initial_positions[2, follower_index] = 0  # Random orientation
+                follower_index += 1
+
+    return initial_positions
+
+
+# Randomly Initialize Current Positions for Each UGV across num_steps
+
 # Define initial positions for all robots
-initial_positions = np.array([
-    [0.1, -0.85, -0.65, -0.45, -0.85, -0.65, -0.45, -0.85, -0.65, -0.45],
-    [0.1, -0.1,  -0.1,  -0.1,   0.1,   0.1,   0.1,   0.3,   0.3,   0.3],
-    [0.0,  0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0]
-])  # Shape: (3, TOTAL_ROBOTS)
+initial_positions = generate_initial_positions(CONFIG["TOTAL_ROBOTS"], x_range, y_range, CONFIG["initial_leader_position"])
+
 
 # Define nearby positions deterministically
 nearby_positions = initial_positions[:2, :]
@@ -166,8 +208,8 @@ P_cross_pred = np.zeros((3, 3, CONFIG["TOTAL_ROBOTS"],  CONFIG["num_steps"]))  #
 
 # Fill initial covariance matrices with identity matrices for the first time step
 for i in range(CONFIG["TOTAL_ROBOTS"]):
-    P_self_pred[:, :, i, 0] = 0.00001*np.eye(3)  # Initial covariance for the first time step
-    P_cross_pred[:, :, i, 0] = 0.00001*np.eye(3)  # Initial covariance for the first time step
+    P_self_pred[:, :, i, 0] = 0.01*np.eye(3)  # Initial covariance for the first time step
+    P_cross_pred[:, :, i, 0] = 0.01*np.eye(3)  # Initial covariance for the first time step
 
 
 # Initialize State Estimates and Covariance Matrices
@@ -179,8 +221,8 @@ P_cross = np.zeros((3, 3, CONFIG["TOTAL_ROBOTS"],  CONFIG["num_steps"]))  # For 
 
 # Fill initial covariance matrices with identity matrices for the first time step
 for i in range(CONFIG["TOTAL_ROBOTS"]):
-    P_self[:, :, i, 0] = 0.00001*np.eye(3)  # Initial covariance for the first time step
-    P_cross[:, :, i, 0] = 0.00001*np.eye(3)  # Initial covariance for the first time step
+    P_self[:, :, i, 0] = 0.01*np.eye(3)  # Initial covariance for the first time step
+    P_cross[:, :, i, 0] = 0.01*np.eye(3)  # Initial covariance for the first time step
 
 
 
@@ -297,50 +339,6 @@ def stanley_control(current_position, current_heading, waypoints, k=0.5):
 
 
 
-
-def generate_initial_positions(num_robots, x_range, y_range, initial_leader_position):
-    """
-    Generate initial positions for the robots in a grid pattern around the leader's initial position.
-
-    Parameters:
-        num_robots (int): Total number of robots (including the leader).
-        x_range (tuple): Operational range for the x-coordinate (min, max).
-        y_range (tuple): Operational range for the y-coordinate (min, max).
-        initial_leader_position (np.ndarray): Initial position of the leader robot (x, y).
-        grid_size (int): The number of rows and columns for the grid layout for followers.
-
-    Returns:
-        np.ndarray: An array of shape (3, num_robots) containing the initial positions and orientations.
-    """
-
-    grid_size = 3
-    
-    # Create an array to hold the initial positions of all robots
-    initial_positions = np.zeros((3, num_robots))  # 3 rows for [x, y, theta]
-
-    # Set the initial position and orientation of the leader robot (index 0)
-    initial_positions[0, 0] = initial_leader_position[0]  # Leader's x position
-    initial_positions[1, 0] = initial_leader_position[1]  # Leader's y position
-    initial_positions[2, 0] = 0  # Leader's orientation set to 90 degrees (pi/2)
-
-    # Calculate spacing for grid placement
-    spacing_x = 0.2*(x_range[1] - x_range[0]) / (grid_size + 1)  # Space between each robot in x-direction
-    spacing_y = 0.2*(y_range[1] - y_range[0]) / (grid_size + 1)  # Space between each robot in y-direction
-
-    # Position the followers in a grid-like pattern
-    follower_index = 1
-    for row in range(grid_size):
-        for col in range(grid_size):
-            if follower_index < num_robots:
-                # Calculate the follower's position based on grid layout
-                initial_positions[0, follower_index] = initial_leader_position[0] + (col - grid_size // 2) * spacing_x - 0.75
-                initial_positions[1, follower_index] = initial_leader_position[1] + (row - grid_size // 2) * spacing_y 
-                initial_positions[2, follower_index] = 0  # Random orientation
-                follower_index += 1
-
-    return initial_positions
-
-
 # EKF Functions
 
 def time_update(x_hat, P_self, Q, control_input, f, F_jacobian, P_cross):
@@ -352,7 +350,6 @@ def time_update(x_hat, P_self, Q, control_input, f, F_jacobian, P_cross):
     # Predict state using nonlinear transition function
     x_hat_pred = f(x_hat, control_input).flatten()
 
-    print(x_hat_pred, "x_hat_pred")
 
     # Calculate Jacobians of f with respect to state and control input
     F_x, F_u = F_jacobian(x_hat, control_input)
@@ -385,8 +382,6 @@ def measurement_update(x_hat_pred, P_self_pred, measurement, R, predicted_nearby
 
     # Calculate Jacobian of h at the predicted state estimate
     H_r, H_l = H_jacobian(x_hat_pred, predicted_nearby_positions)
-
-    print(H_r, "H_r")
 
 
     # Innovation (residual)
@@ -427,8 +422,6 @@ def measurement_update(x_hat_pred, P_self_pred, measurement, R, predicted_nearby
     # Updated state estimate
     x_hat_updated = x_hat_pred + update
     logging.debug(f"Updated state estimate: {x_hat_updated.shape}")
-
-    print(x_hat_updated, "x_hat_updated")
 
     # Update covariance estimate
     P_self_updated = P_self_pred - K_regular @ P_zz @ K_regular.T
@@ -956,7 +949,6 @@ def create_laplacian_matrix(total_robots, ground_truth):
     
     # Initialize the adjacency matrix
     A = np.zeros((total_robots, total_robots))
-    shadow = True
 
     # Fill the adjacency matrix based on the sensing range and shadow
     for i in range(total_robots):
@@ -968,9 +960,6 @@ def create_laplacian_matrix(total_robots, ground_truth):
                 if distance < CONFIG["regular_sensing_range"]:
                     A[i, j] = 1
                 
-                # Shadow neighbors if the flag is True and within shadow sensing range
-                if shadow and CONFIG["shadow_sensing_range"] is not None and distance < CONFIG["shadow_sensing_range"]:
-                    A[i, j] = 1
 
     # Compute the degree matrix D
     D = np.diag(np.sum(A, axis=1))  # Sum along rows to get the degree of each node
@@ -1098,6 +1087,63 @@ def topological_neighbors(L, agent, ground_truth):
                 
     return np.array(regular_neighbors), np.array(shadow_neighbors)
 
+
+# Function to recalculate the connectivity based on updated robot positions
+def update_connectivity(ground_truth, config):
+    # Initialize empty lists for connection indices
+    rows = []
+    cols = []
+    
+    # Recalculate Laplacian matrix based on current positions
+    L = create_laplacian_matrix(config["TOTAL_ROBOTS"], ground_truth)
+
+    # Populate rows and cols based on neighbors using the Laplacian matrix
+    for i in range(config["TOTAL_ROBOTS"]):
+        neighbors, _ = topological_neighbors(L, i, ground_truth)
+        for neighbor in neighbors:
+            rows.append(i)        # Current robot index
+            cols.append(neighbor)  # Neighbor robot index
+
+    # Convert rows and cols to numpy arrays for easier indexing
+    return np.array(rows), np.array(cols)
+
+
+# Function to update lines and labels for robots
+def update_lines_and_labels(r, ground_truth, rows, cols, follower_indices, leader_index, line_leader, leader_label, line_followers, follower_labels):
+    # Update leader position and line
+    leader_label.set_position([ground_truth[0, leader_index], ground_truth[1, leader_index] + 0.15])
+    leader_label.set_fontsize(12)
+    
+    # Ensure leader line is updated
+    line_leader.set_data(
+        [ground_truth[0, leader_index], ground_truth[0, follower_indices[0]]],
+        [ground_truth[1, leader_index], ground_truth[1, follower_indices[0]]]
+    )
+
+    # Remove previous follower lines
+    for line in line_followers:
+        line.remove()
+    line_followers.clear()
+
+    # Update the lines for follower robots based on new connectivity
+    for q, follower_index in enumerate(follower_indices):
+        if follower_index >= ground_truth.shape[1]:
+            continue
+
+        follower_label = follower_labels[q]
+        follower_label.set_position([ground_truth[0, follower_index], ground_truth[1, follower_index] + 0.15])
+        follower_label.set_fontsize(12)
+        
+        # Create lines for each follower's updated connections
+        for idx, neighbor in zip(rows, cols):
+            if idx == follower_index:
+                line_follower, = r.axes.plot(
+                    [ground_truth[0, follower_index], ground_truth[0, neighbor]],
+                    [ground_truth[1, follower_index], ground_truth[1, neighbor]],
+                    linewidth=0.3, color='b', zorder=-1
+                )
+                line_followers.append(line_follower)  # Store reference to the line object
+
 def run_simulation(robotarium_env, CONFIG, x_hat, P_self, P_cross, positions,
                    apply_process_noise, time_update, measurement_function, 
                    measurement_update, attack_detected, topological_neighbors, event_triggered, 
@@ -1145,10 +1191,9 @@ def run_simulation(robotarium_env, CONFIG, x_hat, P_self, P_cross, positions,
     Neighbors = []
 
     initial_positions = generate_initial_positions(CONFIG["TOTAL_ROBOTS"], x_range, y_range, CONFIG["initial_leader_position"])
-    x_hat_pred[:, :, 0] = initial_positions
-    x_hat[:, :, 0] = initial_positions
+    
 
-    r = robotarium.Robotarium(number_of_robots=CONFIG["TOTAL_ROBOTS"], show_figure=True, initial_conditions=initial_positions, sim_in_real_time=True)
+    r = robotarium.Robotarium(number_of_robots=CONFIG["TOTAL_ROBOTS"],  initial_conditions=initial_positions, sim_in_real_time=True)
     _,uni_to_si_states = create_si_to_uni_mapping()
     si_to_uni_dyn = create_si_to_uni_dynamics()
     si_barrier_cert = create_single_integrator_barrier_certificate_with_boundary()
@@ -1165,6 +1210,7 @@ def run_simulation(robotarium_env, CONFIG, x_hat, P_self, P_cross, positions,
 
     ground_truth = r.get_poses()
 
+    x_hat[:, :, 0] = ground_truth
 
     leader_index = 0  # Leader is robot 0
     follower_indices = [i for i in range(1, CONFIG["TOTAL_ROBOTS"]) if i < ground_truth.shape[1]] 
@@ -1233,26 +1279,11 @@ def run_simulation(robotarium_env, CONFIG, x_hat, P_self, P_cross, positions,
         )
         follower_labels.append(follower_label)
 
-    # Plot waypoints in the Robotarium
-    # Generate waypoints
-    waypoints = generate_spline_waypoints(CONFIG["initial_leader_position"])
-
-    # Set the target position as the last waypoint
-    target_position = waypoints[:, -1]
-
-    # Create the plot using your custom r object
-    # Assuming `r` is your plot object that has axes property
-    waypoint_lines = r.axes.plot(waypoints[0], waypoints[1], 'g--', linewidth=2.5, label='Leader Path', zorder=-2)
-
     # Mark the initial position
-    initial_marker = r.axes.plot(CONFIG["initial_leader_position"][0], CONFIG["initial_leader_position"][1], 'ro', label='Initial Position')
-    r.axes.text(CONFIG["initial_leader_position"][0], CONFIG["initial_leader_position"][1] + 0.05, 'Initial Position', 
+    initial_marker = r.axes.plot(CONFIG["initial_leader_position"][0]-0.5, CONFIG["initial_leader_position"][1], 'ro', label='Initial Position')
+    r.axes.text(CONFIG["initial_leader_position"][0] -0.5, CONFIG["initial_leader_position"][1] + 0.05, 'Initial Position', 
              horizontalalignment='center', color='black')
-
-    # Mark the target position
-    target_marker = r.axes.plot(target_position[0], target_position[1], 'bo', label='Target Position')
-    r.axes.text(target_position[0], target_position[1] + 0.05, 'Target Position', 
-             horizontalalignment='center', color='black')
+    
 
     # Additional plot settings if needed
     r.axes.set_xlim(-2, 2)
@@ -1293,6 +1324,20 @@ def run_simulation(robotarium_env, CONFIG, x_hat, P_self, P_cross, positions,
         dos_attacked_robots = dos_attacked_robots[:max_dos_robots]  # Limit to max_dos_robots
         logging.info(f"Robots affected by DoS attack: {dos_attacked_robots}")
 
+        rows, cols = update_connectivity(ground_truth, CONFIG)
+
+            # Update lines and labels based on new connectivity
+        update_lines_and_labels(r, ground_truth, rows, cols, follower_indices, leader_index, line_leader, leader_label, line_followers, follower_labels)
+
+        leader_path = []
+    
+        # Get the current position of the leader robot
+        leader_position = ground_truth[:, leader_index]  # Ensure this gets updated each step        
+        # Update leader path by appending the current position
+            # Update leader path by appending the current position (x and y only)
+        leader_path = leader_position[:2]  # Store only x and y
+        leader_path_marker = r.axes.plot(leader_path[0], leader_path[1], 'ro')
+
         for i in range(CONFIG["TOTAL_ROBOTS"]):   
             
             L = create_laplacian_matrix(CONFIG["TOTAL_ROBOTS"], ground_truth)
@@ -1332,125 +1377,16 @@ def run_simulation(robotarium_env, CONFIG, x_hat, P_self, P_cross, positions,
             combined_measurements = np.concatenate([range_meas, bearing_meas])
             logging.info(f"Combined measurements generated for robot {i}: {combined_measurements}")
 
-            # Initialize state before the loop if it's not already initialized
-            if "state" not in locals():
-                state = 0  # Assuming 0 is the starting state or the initial index for waypoints
-
-            headings_leader = 0.0
-            headings_follower = initialize_headings(CONFIG["TOTAL_ROBOTS"])
-            # Leader control logic
-            if i == CONFIG["LEADER_INDEX"]:
-                leader_position = xi[:, CONFIG["LEADER_INDEX"]]
-                target_position = waypoints[:,state].reshape((2,))
-                # Define and update the current heading of the leader robot
-                current_heading = headings_leader
-                control_input = leader_control_policy(leader_position, current_heading, xi, d_min, CONFIG, waypoints)
-                #plt.scatter(ground_truth[0, i], ground_truth[1, i], color='red', label='Leader' if i == CONFIG["LEADER_INDEX"] else "")
-                
-                # Assuming control_input contains steering angle and velocity
-                steering_angle = control_input[0]  # Extract steering angle from control input
-                dt = 0.1  # Define time step for the simulation
-        
-                # Update the leader's heading
-                headings_leader= update_heading(current_heading, steering_angle, dt)
-
-                # Check if the leader has reached its target waypoint
-                if np.linalg.norm(leader_position - target_position) < CONFIG["close_enough"]:
-                    state = (state + 1) % waypoints.shape[1]  # Update state to the next waypoint
-
-            else:
-                # Follower control logic
-                follower_position = xi[:, i]  # Current position of the follower
-                follower_heading = headings_follower[i]  # Current heading of the follower
-                desired_trajectory = xi[:, CONFIG["LEADER_INDEX"]]  # Follower aims to follow the leader
-
-                # Call the follower control policy using Stanley Controller
-                control_input = follower_control_policy(follower_position, follower_heading, desired_trajectory, xi, d_min, CONFIG)
-                
-                # Assuming control_input contains [steering_angle, velocity]
-                steering_angle, velocity = control_input  # Extract steering angle and velocity
-
-                # Update follower's heading based on steering angle and velocity
-                dt = 0.1  # Define time step for the simulation
-                headings_follower[i] = update_heading(follower_heading, steering_angle, dt)
-                # Plot followers
-                #plt.scatter(ground_truth[0, i], ground_truth[1, i], color='green', label='Follower' if i == 0 else "")
-
-            # Apply process noise to the control input for both leader and followers
-            dxi[:, i] = apply_process_noise(control_input, CONFIG)  # Apply noise to follower inputs
-            if i == CONFIG["LEADER_INDEX"]:
-                dxi[:, CONFIG["LEADER_INDEX"]] = apply_process_noise(control_input, CONFIG)  # Apply noise to leader input
-
-            font_size_m = 12
-            # Assume num_followers is defined to be the number of followers you expect
-            line_follower = [plt.Line2D([], []) for _ in range(len(follower_indices))]  # Initialize the Line2D objects
-
-            # Update follower positions and lines
-            for q, follower_label in enumerate(follower_labels):
-                # Update follower label position and font size
-                follower_label.set_position([xi[0, follower_indices[q]], xi[1, follower_indices[q]] + 0.15])
-                follower_label.set_fontsize(determine_font_size(r, font_size_m))
-                
-
-                # Ensure the index is valid for line_followers
-                if q < len(line_followers):
-
-                    # Check if the current follower is affected by DoS or FDI
-                    if follower_indices[q] in dos_attacked_robots or follower_indices[q] in fdi_attacked_robots:
-                        line_color = 'r'  # Set color to black if affected
-                        line_width = 0.1   # Thicker line for affected robots
-                    else:
-                        line_color = 'b'  # Set to blue if not affected
-                        line_width = 0.1   # Default line width for unaffected robots
-
-                    # Update the data for the follower's line using valid indices
-                    if q < len(rows) and q < len(cols):
-                        line_followers[q].set_data(
-                            [ground_truth[0, rows[q + 1]], ground_truth[0, cols[q + 1]]],
-                            [ground_truth[1, rows[q + 1]], ground_truth[1, cols[q + 1]]],
-                        )
-                         # Change color of follower line
-                        line_followers[q].set_color(line_color)
-                        line_followers[q].set_linewidth(line_width)
-
-            # Update leader position and line
-            leader_label.set_position([xi[0, leader_index], xi[1, leader_index] + 0.15])
-            leader_label.set_fontsize(determine_font_size(r, font_size_m))
-
-            # Change color of leader line
-            line_leader.set_color(line_color)
-            line_leader.set_linewidth(line_width)
-
-            # Check if the leader is affected by DoS or FDI
-            if leader_index in dos_attacked_robots or leader_index in fdi_attacked_robots:
-                line_color = 'r'  # Set color to black if affected
-                line_width = 0.1  # Thicker line for affected leader
-            else:
-                line_color = 'k'  # Set to red if not affected
-                line_width = 0.1  # Default line width for unaffected leader
-
-            # Update the data for the leader's line
-            line_leader.set_data(
-                [ground_truth[0, leader_index], ground_truth[0, follower_indices[0]]],
-                [ground_truth[1, leader_index], ground_truth[1, follower_indices[0]]]
-            )
-
-            
-
-            # Plot the waypoints if needed
-            waypoint_lines[0].set_xdata(waypoints[0])
-            waypoint_lines[0].set_ydata(waypoints[1])
-
-            control_input_noisy = apply_process_noise(control_input, CONFIG)
            
 
-            # Ensure control_input_noisy is 2D before setting velocities
-            if control_input_noisy.ndim == 1:
-                control_input_noisy = control_input_noisy[:, np.newaxis]
+            if 0<=step <= 80:
+                control_input_noisy = [0.2,0.4]  # Set the last 5 samples to zero for all robots
 
-            if step >= 170:
-                control_input_noisy = [0,0]  # Set the last 5 samples to zero for all robots
-                x_hat[:, i, step-1] = x_hat[:, i, 170]
+            if 80<=step <= 120:
+                control_input_noisy = [0.2,-0.8]  # Set the last 5 samples to zero for all robots
+            
+            if 120<=step <= 220:
+                control_input_noisy = [0.2,-0.4]  # Set the last 5 samples to zero for all robots
             
             
 
@@ -1530,36 +1466,49 @@ def run_simulation(robotarium_env, CONFIG, x_hat, P_self, P_cross, positions,
             # Update estimated positions for the next step
             ground_truth_positions.append(ground_truth[:, i])
             estimated_positions.append(x_hat[:, i, step])
-            control_command.append(control_input[:, np.newaxis]) 
             Neighbors.append(neighbors)
 
 
             
-        norms = np.linalg.norm(dxi, 2, 0)
-        magnitude_limit = 0.15
+        #print(dxi, "dxi")
+        norms = np.linalg.norm(dxi, 0.1, 0)
+        magnitude_limit = 0.1
         idxs_to_normalize = (norms > magnitude_limit)
         dxi[:, idxs_to_normalize] *= magnitude_limit/norms[idxs_to_normalize]
         # Apply control barriers, convert to unicycle, and set velocities
         dxi = si_barrier_cert(dxi, ground_truth[:2, :])
         dxu = si_to_uni_dyn(dxi, ground_truth)
-        if step >= 170:
-             dxu[:, :] = 0  # Set the last 5 samples to zero for all robots
+        
+        
+        if 0 <= step <= 80:
+            dxu[0, :] = 0.2
+            dxu[1, :] = 0.4
+
+        if 80 <= step <= 120:
+            dxu[0, :] = 0.2
+            dxu[1, :] = -0.8
+
+
+        if 120 <= step <= 220:
+            dxu[0, :] = 0.2
+            dxu[1, :] = -0.4
 
        
         r.set_velocities(np.arange(CONFIG["TOTAL_ROBOTS"]), dxu)  # Update velocities for all robots
             # Step the simulation forward
         r.step()
+        x_hat_pred[:, :, 0] = ground_truth
+        x_hat[:, :, 0] = ground_truth
     
     ground_truth_positions = np.array(ground_truth_positions)
     estimated_positions = np.array(estimated_positions)
-    control_command = np.squeeze(np.array(control_command))
     Event_Trigger = np.squeeze(np.array(Event_Trigger))
     Attack_Detection = np.squeeze(np.array(Attack_Detection))
     Neighbors = np.squeeze(np.array(Neighbors))
 
     # Finalizing the simulation
     logging.debug(f"Final step {step}: current positions {positions}")
-    plot_final_states(ground_truth_positions, estimated_positions, control_command,  CONFIG["TOTAL_ROBOTS"], CONFIG["num_steps"])
+    plot_final_states(ground_truth_positions, estimated_positions,  CONFIG["TOTAL_ROBOTS"], CONFIG["num_steps"])
     #plot_event_trigger_and_attack_detection(Event_Trigger, Attack_Detection, CONFIG["TOTAL_ROBOTS"], CONFIG["num_steps"], Neighbors)
     input("Press Enter to close...")  # Pause until user input
     # Clean up the Robotarium environment
@@ -1569,8 +1518,10 @@ def run_simulation(robotarium_env, CONFIG, x_hat, P_self, P_cross, positions,
 
 
 
-def plot_final_states(ground_truth, estimates, control_command, num_robots, samples_per_robot):
+def plot_final_states(ground_truth, estimates, num_robots, samples_per_robot):
     """Plot the trajectories and final positions of UGVs for ground truth, estimates, and control commands."""
+
+
 
     # Create subplots for trajectories
     nrows = int(np.ceil(num_robots / 2))  # Number of rows needed
@@ -1608,8 +1559,8 @@ def plot_final_states(ground_truth, estimates, control_command, num_robots, samp
         else:
             axes[i].set_title(f'Follower Robot {i}', fontsize=14)
 
-        axes[i].set_xlabel("X Position", fontsize=12)
-        axes[i].set_ylabel("Y Position", fontsize=12)
+        axes[i].set_xlabel("X Position (m)", fontsize=12)
+        axes[i].set_ylabel("Y Position (m)", fontsize=12)
         axes[i].grid()
         axes[i].axis('equal')
         axes[i].legend()
@@ -1644,9 +1595,10 @@ def plot_final_states(ground_truth, estimates, control_command, num_robots, samp
             axes_x[i].set_title(f'Follower Robot {i} X Coordinate over Time', fontsize=14)
 
         axes_x[i].set_xlabel("Sample Time", fontsize=12)
-        axes_x[i].set_ylabel("X Position", fontsize=12)
+        axes_x[i].set_ylabel("X Position (m)", fontsize=12)
         axes_x[i].grid()
         axes_x[i].legend()
+
 
     # Handle any unused subplots if the number of robots is not a multiple of 2
     for j in range(num_robots, nrows * ncols):
@@ -1677,7 +1629,7 @@ def plot_final_states(ground_truth, estimates, control_command, num_robots, samp
             axes_y[i].set_title(f'Follower Robot {i} Y Coordinate over Time', fontsize=14)
 
         axes_y[i].set_xlabel("Sample Time", fontsize=12)
-        axes_y[i].set_ylabel("Y Position", fontsize=12)
+        axes_y[i].set_ylabel("Y Position (m)", fontsize=12)
         axes_y[i].grid()
         axes_y[i].legend()
 
@@ -1714,7 +1666,7 @@ def plot_final_states(ground_truth, estimates, control_command, num_robots, samp
             axes_mse[i].set_title(f'Follower Robot {i} Localization Error (MSE)', fontsize=14)
 
         axes_mse[i].set_xlabel("Sample Time", fontsize=12)
-        axes_mse[i].set_ylabel("Mean Square Error", fontsize=12)
+        axes_mse[i].set_ylabel("Mean Square Error (m)", fontsize=12)
         axes_mse[i].grid()
         axes_mse[i].legend()
 
@@ -1731,56 +1683,44 @@ def plot_final_states(ground_truth, estimates, control_command, num_robots, samp
     avg_mse = np.mean(mse, axis=0)
     
     fig_avg_mse, ax_avg_mse = plt.subplots(figsize=(12, 6))
-    ax_avg_mse.plot(time, avg_mse, color='blue', label='Average Localization Error (MSE)', alpha=0.7)
+    ax_avg_mse.plot(time, avg_mse, color='blue', label='Average Mean Square Localization Error (MSE)', alpha=0.7)
     
     ax_avg_mse.set_title('Event-based EKF for Multi-Robot Localization in Sparse Sensing Graph and Adversarial Environment \n Average Localization Error (MSE) Across Robots', fontsize=16)
     ax_avg_mse.set_xlabel('Sample Time', fontsize=14)
-    ax_avg_mse.set_ylabel('Mean Square Error', fontsize=14)
+    ax_avg_mse.set_ylabel('Mean Square Error (m)', fontsize=14)
     ax_avg_mse.grid()
     ax_avg_mse.legend()
     
     plt.tight_layout()
     plt.show()
 
-    # Create a new figure for control commands
-    fig, axes_control = plt.subplots(nrows, ncols, figsize=(12, 5 * nrows))
-    axes_control = axes_control.flatten()
 
-    # Loop through each robot to create subplots for control commands
+    # Calculate the absolute localization error for each robot at each time step
+    absolute_error = np.zeros((num_robots, samples_per_robot))
     for i in range(num_robots):
         start_index = i * samples_per_robot
         end_index = start_index + samples_per_robot
         
-        # Extract control commands
-        linear_velocity = control_command[start_index:end_index, 0]
-        angular_velocity = control_command[start_index:end_index, 1]
+        # Calculate Euclidean distance (absolute error) for each sample
+        absolute_error[i, :] = np.linalg.norm(ground_truth[start_index:end_index, :2] - estimates[start_index:end_index, :2], axis=1)
 
-        # Plot linear velocity
-        axes_control[i].plot(time, linear_velocity, color='green', label='Linear Velocity', alpha=0.7)
-        if i == 0:
-            axes_control[i].set_title('Leader Robot Control Commands', fontsize=14)
-        else:
-            axes_control[i].set_title(f'Follower Robot {i} Control Commands', fontsize=14)
-        axes_control[i].set_xlabel("Sample Time", fontsize=12)
-        axes_control[i].set_ylabel("Velocity", fontsize=12)
-        axes_control[i].grid()
+    # Calculate the average absolute localization error across all robots for each time step (average across robots)
+    avg_absolute_error = np.mean(absolute_error, axis=0)
 
-        # Create a second y-axis for angular velocity
-        ax2 = axes_control[i].twinx()
-        ax2.plot(time, angular_velocity, color='orange', label='Angular Velocity', alpha=0.7)
-        ax2.set_ylabel("Angular Velocity", fontsize=12)
-        
-        # Combine legends from both axes
-        axes_control[i].legend(loc='upper left')
-        ax2.legend(loc='upper right')
+    # Plot the average absolute localization error across all robots
+    plt.figure(figsize=(12, 6))  # Single plot, no subplots
+    plt.plot(time, avg_absolute_error, color='blue', label='Average Mean Absolute Localization Error', alpha=0.7)
 
-    # Handle any unused subplots if the number of robots is not a multiple of 2
-    for j in range(num_robots, nrows * ncols):
-        fig.delaxes(axes_control[j])  # Remove any empty subplots
+    # Add titles, labels, and grid
+    plt.title('Average Absolute Localization Error Across All Robots \n Event-based EKF for Multi-Robot Localization', fontsize=16)
+    plt.xlabel('Sample Time', fontsize=14)
+    plt.ylabel('Absolute Localization Error (m)', fontsize=14)
+    plt.grid(True)
+    plt.legend()
 
-    # Handle any unused subplots if the number of robots is not a multiple of 2
-    for j in range(num_robots, nrows * ncols):
-        fig.delaxes(axes_control[j])  # Remove any empty subplots
+    plt.tight_layout()
+    plt.show()
+
     
         # Save ground truth and estimates to CSV
     for i in range(num_robots):
@@ -1801,13 +1741,6 @@ def plot_final_states(ground_truth, estimates, control_command, num_robots, samp
         start_index = i * samples_per_robot
         end_index = start_index + samples_per_robot
         
-        data = {
-            "Time": np.arange(samples_per_robot),
-            "LinearVelocity": control_command[start_index:end_index, 0],
-            "AngularVelocity": control_command[start_index:end_index, 1],
-        }
-        df = pd.DataFrame(data)
-        df.to_csv(f"robot_{i}_control_commands.csv", index=False)
 
         # Save MSE for each robot
     for i in range(num_robots):
@@ -1825,6 +1758,15 @@ def plot_final_states(ground_truth, estimates, control_command, num_robots, samp
     }
     df_avg_mse = pd.DataFrame(data)
     df_avg_mse.to_csv("average_mse.csv", index=False)
+
+
+            # Save average MSE across robots
+    data = {
+        "Time": np.arange(samples_per_robot),
+        "Average Absolute Error": avg_absolute_error,
+    }
+    df_avg_absolute_error = pd.DataFrame(data)
+    df_avg_absolute_error.to_csv("avg_absolute_error.csv", index=False)
 
 
     plt.tight_layout(pad=6.0)
