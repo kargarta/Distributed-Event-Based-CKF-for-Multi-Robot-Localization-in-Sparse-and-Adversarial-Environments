@@ -1,6 +1,5 @@
-# Event-Triggered CKF for Multi-Robot Localization in Adversarial Environments
-
-This repository implements an **Event-Triggered Cubature Kalman Filter (CKF)** for distributed multi-robot localization under **sparse sensing** and **adversarial conditions**. The framework integrates **Control Barrier Functions (CBFs)** for collision avoidance, **Stanley control** for leader–follower trajectory tracking, and **attack detection** against FDI (False Data Injection) and DoS (Denial-of-Service) attacks.
+# Event-Triggered CKF for Multi-Robot Localization in Sparse/Dense Enviroments
+This repository implements an **Event-Triggered Cubature Kalman Filter (CKF)** for distributed multi-robot localization under **sparse sensing** and **dense sensing**. The framework integrates **Control Barrier Functions (CBFs)** for collision avoidance, **Stanley control** for leader–follower trajectory tracking.
 
 ---
 
